@@ -486,7 +486,6 @@ class Orchestrator:
         after = db.stats()
         total_subs = sum(len(r.subdomains) for r in results)
         active_sources = [r.source for r in results if not r.error]
-        failed_sources = [r.source for r in results if r.error]
         stats = {
             "sources_queried": len(results),
             "sources_ok": len(active_sources),
