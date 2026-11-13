@@ -1,0 +1,38 @@
+# Strata configuration template
+# Copy to .strata.toml in your project directory
+# or to ~/.config/strata/config.toml for global settings.
+#
+# All fields are optional — Strata works without any configuration.
+
+[keys]
+# Optional API keys to unlock additional passive DNS sources.
+# Without keys, crt.sh / HackerTarget / RapidDNS / AlienVault run by default.
+#
+# virustotal    = "YOUR_VT_KEY"       # https://www.virustotal.com/gui/my-apikey
+# securitytrails = "YOUR_ST_KEY"     # https://securitytrails.com/app/account/credentials
+
+[transport]
+# Delay (seconds) between requests to the same host. Increase to stay under WAF limits.
+per_host_delay = 0.3
+
+# Optional proxy for all outbound requests.
+# proxy = "http://127.0.0.1:8080"    # HTTP proxy (Burp, ZAP, etc.)
+# proxy = "socks5://127.0.0.1:1080"  # SOCKS5 proxy
+
+timeout     = 10.0
+max_retries = 2
+
+# Custom User-Agent pool (round-robin). Leave empty to use built-in pool.
+# user_agents = [
+#   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...",
+# ]
+
+[passive_dns]
+# Toggle individual passive DNS sources.
+crtsh          = true   # crt.sh CT logs — always free
+hackertarget   = true   # HackerTarget free API
+rapiddns       = true   # RapidDNS free search
+alienvault     = true   # AlienVault OTX free tier
+virustotal     = true   # only active when [keys].virustotal is set
+securitytrails = true   # only active when [keys].securitytrails is set
+

@@ -1,99 +1,293 @@
 # Strata
 
-Unified attack-surface intelligence engine. One pipeline from a domain or org
-name to a complete, confidence-ranked map of the hidden attack surface: live
-hosts, web content, JS endpoints, secrets, and predicted parameters — every
-claim carrying evidence and a fused confidence score.
-
-Status: **P6 (orchestrator)** — P0 schema/store, P1 DNS discovery, P2 content
-discovery, P3 parameter probing, P4 cross-engine fusion and Triage Loom
-ingestion, P5 HTML/Markdown/SARIF/JSONL reporting with resumable scans, and
-a single `strata run` orchestrator with per-target memory.
-
-## Layout
+Unified attack-surface intelligence engine. One pipeline from a domain to a
+confidence-ranked map of the hidden surface: subdomains, live hosts, JS
+endpoints, secrets, confirmed parameters — every claim backed by evidence and
+a fused confidence score.
 
 ```
-src/strata/
-  core/schema/      UnifiedFinding contract (candidate != finding)
-  core/store/       SQLite persistence, dedup key (run_id, kind, asset_value)
-  core/policy/      scope allowlist gate
-  core/dns/         resolver, wildcard detection, origin inference
-  core/content/     URL canonicalization, secret detection, HTTP transport
-  core/reporting/   HTML/Markdown/SARIF/JSONL report rendering
-  engines/          dns_brute, echoforge, js_content, param_oracle, fusion, orchestrator
-  adapters/         aperture JSONL, VulnHarvest JSON, jsast JSON, Triage Loom
-  cli/              strata run | dns | verify | content | import-* | fuse | report | stats | list
-tools/              source snapshots of companion tools (aperture, triage-loom, echoforge)
+strata run target.com --db target.db
 ```
 
-## Quickstart
+---
+
+## How It Works
+
+```
+absorb → passive → dns → fingerprint → content → param → fuse → tension → report
+```
+
+| Stage | What it does |
+|-------|-------------|
+| **absorb** | Imports any companion-tool outputs before the scan begins |
+| **passive** | Collects subdomains from Certificate Transparency logs and passive sources (no brute-force) |
+| **dns** | Brute-force DNS enumeration with echoforge mutation passes |
+| **fingerprint** | Detects tech stack, WAF, CDN, and security-header posture from HTTP responses |
+| **content** | Crawls HTML/JS/robots/sitemap, extracts endpoints, scans for secrets |
+| **param** | Probes endpoints for hidden parameters with baseline/test request comparison |
+| **fuse** | Merges duplicate entities across engines using noisy-OR confidence |
+| **tension** | Scores how unstable each claim is; labels findings as `hot`, `ghost`, `shadow`, or `stable` |
+| **report** | Writes Markdown, HTML, SARIF 2.1.0, or JSONL output |
+
+---
+
+## Installation
 
 ```bash
 pip install -e ".[dev]"
-pytest
-strata dns example.com --db strata.db
-strata content https://example.com --db strata.db
-strata import-vulnharvest report.json --db strata.db
-strata import-jsast export.json --db strata.db
-strata import-aperture ../aperture/some_output.jsonl --db strata.db
-strata import-triage-loom ../triage-loom/output/high_confidence_targets.jsonl --db strata.db
-strata fuse --db strata.db
-strata run example.com --db strata.db --report-out report.md
-strata run example.com --import-aperture ../aperture/findings.jsonl --db strata.db --report-out report.md
-strata run example.com --import-triage-loom ../triage-loom/output/high_confidence_targets.jsonl --db strata.db --report-out report.md
-strata report --db strata.db --format md --out report.md
-strata report --db strata.db --format html --out report.html
 ```
 
-`strata run` is the coordinated entry point: it plans, executes, explains, and
-reports in one pass. It keeps lightweight per-target memory so the next run can
-adapt instead of repeating the same plan. `strata dns` and `strata content`
-also accept `--resume` to skip assets already stored in the database. In CI,
-`strata report --strict` exits non-zero when any finding survives the report
-filters.
+**Requires Python ≥ 3.12.** No API keys needed for the core pipeline.
 
-Reports are organized into summary, breakdown, confidence distribution, and
-findings sections so a run can be reviewed without digging through a flat
-table. Generated reports are written to `reports/` inside the project by
-default, with a timestamped filename.
+---
 
-## Evidence tension
+## Quick Start
 
-Strata treats findings as hypotheses, not facts. `strata tension` scores how
-unstable a claim is: unverified status, single-source evidence, missing
-live-probe evidence, and confidence gaps are surfaced as tension. Findings are
-classified as `hot`, `ghost`, `shadow`, or `stable`, and the report is written
-to `reports/`.
+```bash
+# Full pipeline — no config required
+strata run target.com --db target.db
 
-Secrets are stored only as SHA-256 asset ids with masked previews; raw values
-never enter the database.
+# Skip passive DNS collection (faster, offline brute-force only)
+strata run target.com --no-passive --db target.db
 
-## Design rules (frozen for P0)
+# Skip fingerprinting
+strata run target.com --no-fingerprint --db target.db
 
-1. A candidate is not a finding: `verified`/`dead` status requires evidence.
-2. Every engine emits `UnifiedFinding`; legacy formats only enter through
-   `adapters/`.
-3. Scope gate lives in `core.policy`; engines refuse out-of-scope assets.
-4. Core runs with zero API keys; keys are per-plugin config.
+# DNS only
+strata dns target.com --db target.db --wordlist common
 
-## Roadmap
+# Content discovery only
+strata content https://target.com --db target.db
 
-- [x] P1 DNS layer (resolver, wildcard filter, echoforge + dns_brute engines, verifier)
-- [x] P2 Content layer (js_content engine, secret scan, jsast + VulnHarvest importers)
-- [x] P3 Parameter layer (ParamOracle)
-- [x] P4 Fusion + triage (noisy-OR, entity resolution; triage-loom consumer)
-- [x] P5 Output hardening (HTML/MD/SARIF/JSONL, resume, CI)
-- [x] P6 Orchestrator (single entry point, adaptive per-target memory)
+# Tension analysis
+strata tension --db target.db
 
-## Bundled companion tools
+# Generate HTML report
+strata report --db target.db --format html --out report.html
 
-Source snapshots of companion tools live under `tools/`:
+# SARIF for CI/CD
+strata report --db target.db --format sarif --out results.sarif
+```
 
-- `tools/aperture/` — subdomain discovery sources (Go)
-- `tools/triage-loom/` — triage + investigation ranking (Python)
+---
+
+## Passive DNS Sources
+
+Strata queries multiple passive sources concurrently with no API keys:
+
+| Source | Key required | Notes |
+|--------|-------------|-------|
+| **crt.sh** | No | Certificate Transparency logs |
+| **HackerTarget** | No | Free tier (rate-limited) |
+| **RapidDNS** | No | Free subdomain search |
+| **AlienVault OTX** | No | Free tier passive DNS |
+| **VirusTotal** | Optional | Set `STRATA_VIRUSTOTAL_KEY` |
+| **SecurityTrails** | Optional | Set `STRATA_SECURITYTRAILS_KEY` |
+
+Sources with errors or missing keys are silently skipped — the run continues
+with whatever sources are available.
+
+---
+
+## Configuration
+
+No config file is required. Strata works out of the box with zero API keys.
+
+To activate optional sources, create `.strata.toml` in your project directory
+(or `~/.config/strata/config.toml` for global settings):
+
+```toml
+# .strata.toml — all fields optional
+
+[keys]
+virustotal    = "YOUR_VT_KEY"
+securitytrails = "YOUR_ST_KEY"
+# shodan      = "YOUR_SHODAN_KEY"   # reserved for future use
+# censys_id   = "..."
+# censys_secret = "..."
+
+[transport]
+per_host_delay = 0.3    # seconds between requests to the same host
+proxy          = ""     # "http://127.0.0.1:8080" or "socks5://..."
+timeout        = 10.0
+max_retries    = 2
+# user_agents = ["Mozilla/5.0 ..."]  # custom UA pool
+
+[passive_dns]
+crtsh          = true
+hackertarget   = true
+rapiddns       = true
+alienvault     = true
+virustotal     = true   # only runs if [keys].virustotal is set
+securitytrails = true   # only runs if [keys].securitytrails is set
+```
+
+**Environment variables** (override config file):
+```bash
+export STRATA_VIRUSTOTAL_KEY="..."
+export STRATA_SECURITYTRAILS_KEY="..."
+export STRATA_PROXY="http://127.0.0.1:8080"
+```
+
+---
+
+## HTTP Transport
+
+By default, Strata uses `ThrottledTransport` for all external requests:
+- **User-Agent rotation** — cycles through a pool of realistic browser UA strings
+- **Per-host rate limiting** — configurable delay (default 0.3s) between requests to the same host
+- **Proxy support** — HTTP and SOCKS5 proxies, set via config or `STRATA_PROXY`
+- **Retry on network errors** — exponential back-off, never retries on 4xx/5xx
+
+---
+
+## HTTP Fingerprinting
+
+The `fingerprint` stage probes each discovered host and detects:
+
+- **WAF** — Cloudflare, Akamai, Imperva, F5 BIG-IP, ModSecurity, PerimeterX, Barracuda, +15 more
+- **CDN** — Cloudflare, AWS CloudFront, Azure CDN, Akamai, Fastly, BunnyCDN, Varnish
+- **Tech stack** — Nginx, Apache, IIS, PHP, Django, Laravel, Rails, Node.js, WordPress, Drupal, Next.js, +20 more
+- **Security headers** — HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, CORP, COOP
+
+Results are stored in `UnifiedFinding.metadata` and included in reports:
+```json
+{
+  "tech_stack": ["Nginx", "PHP", "Laravel"],
+  "waf": "Cloudflare",
+  "cdn": "Cloudflare",
+  "missing_critical_headers": ["content-security-policy"]
+}
+```
+
+---
+
+## Evidence Tension
+
+Strata treats findings as hypotheses, not facts. The `tension` command scores
+how unstable each claim is and classifies it:
+
+| Label | Meaning | Recommended action |
+|-------|---------|-------------------|
+| `hot` | High-confidence, unverified — most likely real | Verify manually now |
+| `ghost` | Marked dead but residual confidence remains | Re-check; may have revived |
+| `shadow` | Low confidence, unsupported claim | Low priority; defer |
+| `stable` | Verified or well-supported | Done |
+
+```bash
+strata tension --db target.db
+```
+
+---
+
+## Companion Tool Integration
+
+Import findings from external tools before or during a run:
+
+```bash
+# Import then run
+strata run target.com \
+  --import-aperture ./aperture-out.jsonl \
+  --import-vulnharvest ./vulnharvest.json \
+  --import-jsast ./jsast.json \
+  --import-triage-loom ./triage-loom-out.jsonl \
+  --db target.db
+
+# Import only
+strata import-aperture aperture-out.jsonl --db target.db
+strata import-vulnharvest report.json --db target.db
+```
+
+Bundled companion tools under `tools/`:
+- `tools/aperture/` — subdomain discovery from passive sources (Go)
 - `tools/echoforge/` — evolutionary subdomain mutation engine (Go)
+- `tools/triage-loom/` — triage and investigation ranking (Python)
 
-`jsast` and `vulnharvest` are integrated directly as adapters under
-`src/strata/adapters/`. You can bring their outputs into a run with
-`--import-aperture`, `--import-jsast`, `--import-vulnharvest`, or
-`--import-triage-loom`.
+---
+
+## All Commands
+
+```
+strata run             Full pipeline on one target
+strata dns             DNS brute-force only
+strata verify          Re-resolve stored candidates → verified/dead
+strata content         JS/robots/sitemap content discovery
+strata fuse            Fuse duplicate entities across runs
+strata tension         Evidence tension analysis
+strata report          Render findings as MD/HTML/SARIF/JSONL
+strata stats           Database statistics
+strata list            List stored findings
+strata import-aperture       Import aperture JSONL
+strata import-vulnharvest    Import VulnHarvest JSON
+strata import-jsast          Import jsast JSON
+strata import-triage-loom    Import Triage Loom JSONL
+```
+
+---
+
+## Output Formats
+
+| Format | Flag | Use case |
+|--------|------|---------|
+| Markdown | `--format md` | Human review, GitHub reports |
+| HTML | `--format html` | Browser-readable, shareable |
+| SARIF 2.1.0 | `--format sarif` | GitHub Code Scanning, CI/CD |
+| JSONL | `--format jsonl` | Pipe to other tools |
+
+Reports are written to `reports/strata-{target}-{timestamp}.{ext}` by default.
+
+---
+
+## CI/CD Integration
+
+```bash
+# Exit non-zero if any finding survives the report
+strata report --db target.db --format sarif --out results.sarif --strict
+
+# Upload to GitHub Code Scanning
+gh api repos/{owner}/{repo}/code-scanning/sarifs \
+  --input results.sarif
+```
+
+---
+
+## Design Principles
+
+1. **A candidate is not a finding** — `verified`/`dead` status requires at least one evidence record.
+2. **Every engine emits `UnifiedFinding`** — legacy formats only enter through `adapters/`.
+3. **Scope gate is mandatory** — engines reject out-of-scope assets before storing.
+4. **Core runs with zero API keys** — keys unlock additional sources, never gate the pipeline.
+5. **Secrets are never stored raw** — only SHA-256 asset IDs with masked previews enter the database.
+
+---
+
+## Project Layout
+
+```
+src/strata/
+  core/config.py        API key + transport config (env or .strata.toml)
+  core/schema/          UnifiedFinding data contract
+  core/store/           SQLite persistence with dedup
+  core/policy/          Scope allowlist gate
+  core/dns/             Resolver, wildcard detection, origin inference
+  core/content/         URL canonicalization, secret detection, HTTP transport
+  core/reporting/       HTML/Markdown/SARIF/JSONL rendering
+  engines/
+    dns_brute.py        Brute-force DNS with echoforge mutations
+    http_fp.py          HTTP fingerprinting (WAF/tech/CDN/headers)
+    js_content.py       Content discovery engine
+    param_oracle.py     Parameter probing engine
+    fusion.py           Noisy-OR entity fusion
+    tension.py          Evidence tension scoring
+    orchestrator.py     Full pipeline with adaptive RunMemory
+  adapters/
+    passive_dns.py      Passive DNS aggregator (crt.sh, HackerTarget, OTX, VT, ST)
+    aperture.py         Aperture JSONL importer
+    vulnharvest.py      VulnHarvest JSON importer
+    jsast.py            jsast JSON importer
+    triage_loom.py      Triage Loom JSONL importer
+tools/
+  aperture/             Subdomain discovery (Go)
+  echoforge/            Mutation engine (Go)
+  triage-loom/          Triage ranking (Python)
+```

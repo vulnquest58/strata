@@ -17,9 +17,11 @@ from urllib.parse import urlparse
 
 from strata.adapters.aperture import load_aperture_jsonl
 from strata.adapters.jsast import load_jsast_report
+from strata.adapters.passive_dns import passive_dns_to_findings, query_passive_dns
 from strata.adapters.triage_loom import load_triage_loom_jsonl
 from strata.adapters.vulnharvest import load_vulnharvest_report
-from strata.core.content.fetch import HttpTransport, UrllibTransport
+from strata.core.config import get_config
+from strata.core.content.fetch import HttpTransport, ThrottledTransport, UrllibTransport
 from strata.core.dns.resolver import DnspythonTransport, Resolver
 from strata.core.paths import timestamped_report_path
 from strata.core.policy.scope import ScopePolicy
@@ -28,6 +30,7 @@ from strata.core.schema.models import FindingClass, is_probable_domain
 from strata.core.store.db import StrataDB
 from strata.engines.dns_brute import DnsDiscoveryEngine
 from strata.engines.fusion import fuse_findings
+from strata.engines.http_fp import fingerprint_url
 from strata.engines.js_content import ContentDiscoveryEngine
 from strata.engines.param_oracle import ParamOracle
 from strata.engines.tension import summarise_tension
@@ -158,6 +161,8 @@ class RunOptions:
     mutate: bool = True
     resume: bool = True
     no_dns: bool = False
+    no_passive: bool = False        # skip passive DNS (crt.sh + API sources)
+    no_fingerprint: bool = False    # skip HTTP fingerprinting
     no_content: bool = False
     no_param: bool = False
     no_fuse: bool = False
@@ -315,11 +320,15 @@ class Orchestrator:
                 "inventory the current surface and import companion tool outputs"
             )
         plan: list[tuple[str, str]] = [("absorb", absorb_reason)]
+        if not self._options.no_passive:
+            plan.append(("passive", "collect subdomains from CT logs and passive sources"))
         if not self._options.no_dns:
             reason = "enumerate candidate names"
             if suggestions.get("wordlist") == "common":
                 reason = "prior DNS was sparse; expand the wordlist"
             plan.append(("dns", reason))
+        if not self._options.no_fingerprint:
+            plan.append(("fingerprint", "fingerprint live hosts (WAF, tech, headers)"))
         if not self._options.no_content:
             reason = "map content, endpoints, and secrets"
             if suggestions.get("max_scripts"):
@@ -342,8 +351,12 @@ class Orchestrator:
         before = db.stats()
         if stage == "absorb":
             return self._stage_absorb(db, before, memory)
+        if stage == "passive":
+            return await self._stage_passive(db, before)
         if stage == "dns":
             return await self._stage_dns(db, before, memory)
+        if stage == "fingerprint":
+            return await self._stage_fingerprint(db, before)
         if stage == "content":
             return await self._stage_content(db, before, memory)
         if stage == "param":
@@ -408,6 +421,105 @@ class Orchestrator:
             except (OSError, ValueError) as exc:
                 self._log.note(f"import error: {path} ({exc})")
         return count
+
+    async def _stage_passive(
+        self, db: StrataDB, before: dict[str, int]
+    ) -> StageResult:
+        self._log.stage("passive", "collect subdomains from CT logs and passive sources")
+        cfg = get_config()
+        results = await query_passive_dns(self._target, config=cfg)
+        findings = passive_dns_to_findings(results, policy=self._policy)
+        for finding in findings:
+            db.upsert_finding(finding)
+        after = db.stats()
+        total_subs = sum(len(r.subdomains) for r in results)
+        active_sources = [r.source for r in results if not r.error]
+        failed_sources = [r.source for r in results if r.error]
+        stats = {
+            "sources_queried": len(results),
+            "sources_ok": len(active_sources),
+            "raw_subdomains": total_subs,
+            "stored": max(0, after.get("findings", 0) - before.get("findings", 0)),
+        }
+        self._log.stat(_db_stats_line(stats))
+        notes: list[str] = []
+        if active_sources:
+            notes.append(f"queried: {', '.join(active_sources)}")
+        if failed_sources:
+            notes.append(f"skipped (no key or error): {', '.join(failed_sources)}")
+        if total_subs:
+            notes.append(f"{total_subs} raw names → {stats['stored']} new findings")
+        else:
+            notes.append("no passive DNS results")
+        for note in notes:
+            self._log.note(note)
+        return StageResult(
+            stage="passive",
+            new_findings=stats["stored"],
+            total_findings=after.get("findings", 0),
+            stats=stats,
+            notes=notes,
+        )
+
+    async def _stage_fingerprint(
+        self, db: StrataDB, before: dict[str, int]
+    ) -> StageResult:
+        self._log.stage("fingerprint", "fingerprint live hosts (tech stack, WAF, security headers)")
+        # Collect verified subdomains and seed URL
+        targets: list[str] = [self._seed]
+        for finding in db.iter_findings():
+            if finding.kind is FindingClass.SUBDOMAIN:
+                targets.append(f"https://{finding.asset_value}")
+        # Deduplicate, cap at 20 hosts
+        seen: set[str] = set()
+        unique: list[str] = []
+        for t in targets:
+            if t not in seen:
+                seen.add(t)
+                unique.append(t)
+        unique = unique[:20]
+
+        transport = ThrottledTransport(per_host_delay=0.5)
+        fp_findings = []
+        errors = 0
+        for url in unique:
+            fp = await fingerprint_url(
+                url,
+                transport=transport,
+                timeout=self._options.timeout,
+                run_id=f"fp:{self._target}",
+            )
+            if fp and fp.finding:
+                db.upsert_finding(fp.finding)
+                fp_findings.append(fp)
+            elif not fp:
+                errors += 1
+
+        after = db.stats()
+        waf_found = [fp.waf for fp in fp_findings if fp.waf]
+        tech_found = list({t for fp in fp_findings for t in fp.tech_stack})
+        stats = {
+            "hosts_probed": len(unique),
+            "fingerprinted": len(fp_findings),
+            "errors": errors,
+        }
+        self._log.stat(_db_stats_line(stats))
+        notes: list[str] = []
+        if waf_found:
+            notes.append(f"WAF detected: {', '.join(set(waf_found))}")
+        if tech_found:
+            notes.append(f"tech stack: {', '.join(tech_found[:8])}")
+        if not notes:
+            notes.append("no distinctive fingerprints")
+        for note in notes:
+            self._log.note(note)
+        return StageResult(
+            stage="fingerprint",
+            new_findings=max(0, after.get("findings", 0) - before.get("findings", 0)),
+            total_findings=after.get("findings", 0),
+            stats=stats,
+            notes=notes,
+        )
 
     async def _stage_dns(
         self, db: StrataDB, before: dict[str, int], memory: RunMemory
