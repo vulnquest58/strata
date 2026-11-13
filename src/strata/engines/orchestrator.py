@@ -330,7 +330,11 @@ class Orchestrator:
             return result
 
         for stage_name, _reason in plan:
-            stage_result = await self._execute(stage_name, db, memory)
+            try:
+                stage_result = await self._execute(stage_name, db, memory)
+            except (ValueError, OSError, RuntimeError) as exc:
+                self._log.note(f"stage {stage_name!r} error: {exc}")
+                stage_result = None
             if stage_result is not None:
                 result.stages.append(stage_result)
                 memory.record(
@@ -493,8 +497,17 @@ class Orchestrator:
         notes: list[str] = []
         if active_sources:
             notes.append(f"queried: {', '.join(active_sources)}")
-        if failed_sources:
-            notes.append(f"skipped (no key or error): {', '.join(failed_sources)}")
+        # Distinguish key-gated sources from network errors
+        key_gated = {"virustotal", "securitytrails"}
+        no_key_srcs  = [r.source for r in results if r.error and r.source in key_gated]
+        net_err_srcs = [r.source for r in results if r.error and r.source not in key_gated]
+        if no_key_srcs:
+            notes.append(f"skipped (no API key): {', '.join(no_key_srcs)}")
+        if net_err_srcs:
+            # Include the first error message for quick diagnosis
+            first_err = next(r.error for r in results if r.source in net_err_srcs)
+            short_err = first_err[:60] if first_err else "network error"
+            notes.append(f"failed (network error): {', '.join(net_err_srcs)} — {short_err}")
         if total_subs:
             notes.append(f"{total_subs} raw names → {stats['stored']} new findings")
         else:

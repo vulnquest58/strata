@@ -41,7 +41,7 @@ from strata.core.schema.models import (
 from strata.core.store.db import StrataDB
 from strata.engines.fusion import fuse_findings
 
-_VERSION = "0.3.0"
+_VERSION = "0.3.1"
 
 
 # ─────────────────────────── import-aperture ────────────────────────────────
