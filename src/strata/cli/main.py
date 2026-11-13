@@ -322,6 +322,28 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     elapsed = time.monotonic() - t0
 
+    # Build scope filter — keep only findings that belong to the current target
+    from strata.core.policy.scope import ScopePolicy as _SP
+    _scope_spec = options.scope or target
+    try:
+        _policy = _SP.from_spec(_scope_spec)
+    except Exception:
+        _policy = None
+
+    def _in_scope(f) -> bool:
+        if _policy is None:
+            return True
+        try:
+            # Try as domain first, then as host (strips scheme/path)
+            av = f.asset_value
+            if _policy.allows_domain(av):
+                return True
+            # Strip scheme for URLs: https://sub.example.com/path → sub.example.com
+            host = av.split("//", 1)[-1].split("/")[0].split(":")[0]
+            return _policy.allows_host(host)
+        except Exception:
+            return target in f.asset_value
+
     # summary
     db = StrataDB(options.db_path)
     db_stats = db.stats()
@@ -329,8 +351,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     findings = []
     try:
         db2 = StrataDB(options.db_path)
-        findings = list(db2.iter_findings())
+        all_findings = list(db2.iter_findings())
         db2.close()
+        # Filter to current target's scope only
+        findings = [f for f in all_findings if _in_scope(f)]
+        # Warn if DB contains findings from other targets
+        other_count = len(all_findings) - len(findings)
+        if other_count > 0:
+            warn(
+                f"DB contains {other_count} findings from other targets "
+                f"(excluded from display). "
+                f"Use {C.CYAN}--db {target.replace('.', '-')}.db{C.RST} "
+                f"for isolated target DBs."
+            )
     except Exception:
         pass
 
@@ -338,9 +371,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         section("Top Findings", Icon.BULLET)
         print_findings_table(sorted(findings, key=lambda f: -f.confidence.value)[:15])
 
+    # Build scoped stats from filtered findings
+    from strata.core.schema.models import FindingStatus as _FS
+    scoped_stats: dict[str, int | str] = {
+        "findings":         len(findings),
+        "verified":         sum(1 for f in findings if f.status == _FS.VERIFIED),
+        "candidate":        sum(1 for f in findings if f.status == _FS.CANDIDATE),
+        "dead":             sum(1 for f in findings if f.status == _FS.DEAD),
+    }
     print_summary_box(
         target,
-        {k: v for k, v in db_stats.items()},
+        scoped_stats,
         elapsed,
         str(result.report_path) if result.report_path else None,
     )
