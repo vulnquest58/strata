@@ -346,7 +346,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # summary
     db = StrataDB(options.db_path)
-    db_stats = db.stats()
+    db.stats()
     db.close()
     findings = []
     try:
