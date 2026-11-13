@@ -178,33 +178,81 @@ class RunOptions:
 
 
 class RunLog:
+    """Styled terminal output for the orchestrator pipeline."""
+
+    # Lazy import of ui to avoid circular deps and keep tests fast
+    @staticmethod
+    def _ui():  # type: ignore[return]
+        try:
+            from strata.cli import ui
+            return ui
+        except ImportError:
+            return None
+
     def header(self, target: str) -> None:
-        print(f"strata run - {target}")
+        u = self._ui()
+        if u:
+            u.section("Pipeline", u.Icon.RUN)
+            u.print_kv_table([
+                u.KV("target", target, u.C.GREEN),
+            ])
+        else:
+            print(f"strata run - {target}")
 
     def field(self, name: str, value: Any) -> None:
-        print(f"  {name:<9}: {value}")
+        u = self._ui()
+        if u:
+            u.print_kv_table([u.KV(name, str(value), u.C.WHITE)])
+        else:
+            print(f"  {name:<9}: {value}")
 
     def stage(self, name: str, reason: str) -> None:
-        print(f"\n  [{name}] {reason}")
+        u = self._ui()
+        if u:
+            u.stage_start(name, reason)
+        else:
+            print(f"\n  [{name}] {reason}")
 
     def stat(self, text: str) -> None:
-        print(f"    {text}")
+        u = self._ui()
+        if u:
+            u.info(text)
+        else:
+            print(f"    {text}")
 
     def note(self, text: str) -> None:
-        print(f"    {text}")
+        u = self._ui()
+        if u:
+            u.info(text)
+        else:
+            print(f"    {text}")
 
     def insight(self, text: str) -> None:
-        print(f"    learning: {text}")
+        u = self._ui()
+        if u:
+            # green bullet for learning insights
+            print(f"  {u.C.GREEN}★{u.C.RST}  {u.C.GRAY}learning:{u.C.RST} {text}")
+        else:
+            print(f"    learning: {text}")
 
     def footer(self, stats: dict[str, int]) -> None:
-        findings = stats.get("findings", 0)
-        verified = stats.get("status_verified", 0)
+        findings  = stats.get("findings", 0)
+        verified  = stats.get("status_verified", 0)
         candidate = stats.get("status_candidate", 0)
-        dead = stats.get("status_dead", 0)
-        print(
-            f"\n  done      : {findings} findings, {verified} verified, "
-            f"{candidate} candidate, {dead} dead"
-        )
+        dead      = stats.get("status_dead", 0)
+        u = self._ui()
+        if u:
+            u.print_kv_table([
+                u.KV("findings",  str(findings),  u.C.BWHITE),
+                u.KV("verified",  str(verified),  u.C.BGREEN  if verified  > 0 else u.C.GRAY),
+                u.KV("candidate", str(candidate), u.C.BYELLOW if candidate > 0 else u.C.GRAY),
+                u.KV("dead",      str(dead),       u.C.GRAY),
+            ])
+        else:
+            print(
+                f"\n  done      : {findings} findings, {verified} verified, "
+                f"{candidate} candidate, {dead} dead"
+            )
 
 
 def _normalize_target(target: str) -> str:

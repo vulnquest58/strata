@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "strata"
-version = "0.2.0"
+version = "0.3.0"
 description = "Unified attack-surface intelligence engine: DNS discovery, content extraction, and hidden-surface prediction under one evidence model"
 readme = "README.md"
 license = "MIT"
