@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strata"
+version = "0.2.0"
+description = "Unified attack-surface intelligence engine: DNS discovery, content extraction, and hidden-surface prediction under one evidence model"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "VulnQuest" }]
+requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+dependencies = [
+    "pydantic>=2.6",
+    "dnspython>=2.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/vulnquest58/strata"
+Issues = "https://github.com/vulnquest58/strata/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+strata = "strata.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+strata = ["data/wordlists/*.txt", "core/dns/data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,60 @@
+{
+  "source": "https://app.example.com/static/app.js",
+  "stats": {
+    "endpoints_count": 1,
+    "secrets_count": 1,
+    "flags_count": 0,
+    "auth_patterns_count": 0,
+    "dynamic_routes_count": 0,
+    "high_value_endpoints": 1
+  },
+  "endpoints": [
+    {
+      "url": "https://app.example.com/api/v2/orders",
+      "method": "POST",
+      "params": ["orderId"],
+      "headers": {
+        "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.fake.fake",
+        "Content-Type": "application/json"
+      },
+      "auth_required": true,
+      "source_line": 42,
+      "context": "fetch('/api/v2/orders')",
+      "confidence": 85.0,
+      "high_value": true,
+      "category": "api",
+      "score": 85.0,
+      "priority": "HIGH",
+      "taint_flows": [],
+      "is_reachable": true,
+      "is_dead_code": false,
+      "validated": false,
+      "exploitability": "",
+      "impact": ""
+    }
+  ],
+  "secrets": [
+    {
+      "kind": "aws_access_key",
+      "value": "AKIA...MPLE",
+      "variable_name": "AWS_KEY",
+      "source_line": 9,
+      "entropy": 4.1,
+      "confidence": 90.0,
+      "score": 90.0,
+      "priority": "HIGH",
+      "taint_flows": [],
+      "is_reachable": true,
+      "is_dead_code": false,
+      "validated": true,
+      "exploitability": "",
+      "impact": ""
+    }
+  ],
+  "feature_flags": [],
+  "auth_patterns": [],
+  "dynamic_routes": [],
+  "prototype_pollution": [],
+  "sca_findings": [],
+  "cognitive_findings": []
+}

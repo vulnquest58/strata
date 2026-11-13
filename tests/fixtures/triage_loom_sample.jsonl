@@ -1,0 +1,1 @@
+{"root_domain":"example.com","asset_id":"api.example.com","endpoint_pattern":"/api/v1/users/{id}","representative_url":"https://api.example.com/api/v1/users/42","corroboration_layers":["liveness","archive_wayback"],"is_high_confidence":true,"parameters":["id"],"cluster_size":3,"novelty":{"total":0.7}}

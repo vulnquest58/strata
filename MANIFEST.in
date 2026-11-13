@@ -1,0 +1,7 @@
+include README.md
+include tools/README.md
+include tools/manifest.json
+recursive-include tools/aperture *.go *.mod *.sum *.yaml *.md
+recursive-include tools/triage-loom *.py *.toml *.md
+recursive-include tools/echoforge *.go *.mod *.sum *.yaml *.md
+recursive-include tests/fixtures *

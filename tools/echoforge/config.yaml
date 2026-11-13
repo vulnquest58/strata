@@ -1,0 +1,55 @@
+# EchoForge Configuration File
+# All settings here are overridden by command-line flags.
+
+# ── Scan Defaults ────────────────────────────────────────────────────────────
+scan:
+  depth: 3          # Echo evolution depth (1-6)
+  threads: 50       # Concurrent goroutines
+  timeout: 4        # Per-request timeout in seconds
+  min_confidence: 20.0
+  industry: "auto"  # auto | tech | finance | ecommerce | healthcare
+
+# ── Stealth ──────────────────────────────────────────────────────────────────
+stealth:
+  enabled: false
+  max_threads: 10
+  base_delay_ms: 1500
+  jitter_factor: 0.8
+
+# ── Passive Sources ──────────────────────────────────────────────────────────
+passive:
+  crtsh: true
+  wayback: true
+  otx: true
+  commoncrawl: false   # Enable with --full-passive (slow)
+
+# ── DNS/DoH Resolvers ────────────────────────────────────────────────────────
+resolvers:
+  - name: "Cloudflare"
+    url: "https://cloudflare-dns.com/dns-query"
+  - name: "Google"
+    url: "https://dns.google/dns-query"
+  - name: "Quad9"
+    url: "https://dns.quad9.net/dns-query"
+  - name: "OpenDNS"
+    url: "https://doh.opendns.com/dns-query"
+  - name: "AdGuard"
+    url: "https://dns.adguard-dns.com/dns-query"
+
+# ── Output ───────────────────────────────────────────────────────────────────
+output:
+  format: "table"       # table | json | csv | html | all
+  directory: "./output"
+  quiet: false
+  verbose: false
+
+# ── Markov Chain ─────────────────────────────────────────────────────────────
+markov:
+  order: 2
+  max_token_length: 4
+  candidates_per_seed: 5
+
+# ── N-gram ───────────────────────────────────────────────────────────────────
+ngram:
+  max_n: 3
+  top_k: 20

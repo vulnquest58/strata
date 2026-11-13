@@ -1,0 +1,217 @@
+industries:
+  tech:
+    keywords:
+      - api
+      - dev
+      - staging
+      - prod
+      - internal
+      - admin
+      - cdn
+      - dashboard
+      - app
+      - web
+      - portal
+      - backend
+      - frontend
+      - microservice
+      - gateway
+      - auth
+      - oauth
+      - sso
+      - sdk
+      - docs
+      - status
+      - monitor
+      - metrics
+      - grafana
+      - jenkins
+      - gitlab
+      - ci
+      - cd
+      - build
+      - deploy
+      - sandbox
+      - qa
+      - uat
+      - preview
+      - demo
+    prefixes:
+      - api
+      - dev
+      - prod
+      - staging
+      - internal
+      - app
+    suffixes:
+      - v2
+      - v3
+      - eu
+      - us
+      - ap
+      - beta
+      - test
+
+  finance:
+    keywords:
+      - secure
+      - banking
+      - core
+      - transaction
+      - payment
+      - gateway
+      - swift
+      - ach
+      - wire
+      - transfer
+      - account
+      - ledger
+      - fraud
+      - compliance
+      - kyc
+      - aml
+      - risk
+      - trading
+      - market
+      - quote
+      - portfolio
+      - wealth
+      - invest
+      - loan
+      - credit
+      - debit
+      - card
+      - mobile
+      - online
+      - ibk
+      - ebanking
+      - corp
+      - retail
+      - private
+    prefixes:
+      - secure
+      - banking
+      - core
+      - payment
+      - mobile
+    suffixes:
+      - secure
+      - corp
+      - eu
+      - us
+      - prod
+
+  ecommerce:
+    keywords:
+      - shop
+      - store
+      - cart
+      - checkout
+      - payment
+      - order
+      - product
+      - catalog
+      - search
+      - recommend
+      - review
+      - seller
+      - buyer
+      - warehouse
+      - inventory
+      - shipping
+      - tracking
+      - delivery
+      - promo
+      - coupon
+      - loyalty
+      - reward
+      - affiliate
+      - partner
+      - media
+      - cdn
+      - image
+      - assets
+      - static
+      - account
+      - wishlist
+    prefixes:
+      - shop
+      - store
+      - api
+      - cdn
+      - media
+    suffixes:
+      - eu
+      - us
+      - asia
+      - prod
+      - v2
+
+  healthcare:
+    keywords:
+      - patient
+      - clinical
+      - ehr
+      - emr
+      - provider
+      - portal
+      - lab
+      - pharmacy
+      - prescription
+      - imaging
+      - radiology
+      - billing
+      - claims
+      - insurance
+      - telemedicine
+      - telemed
+      - consult
+      - secure
+      - hipaa
+      - admin
+      - staff
+      - doctor
+      - nurse
+      - icu
+      - scheduling
+      - appointment
+      - referral
+      - analytics
+      - data
+    prefixes:
+      - patient
+      - provider
+      - clinical
+      - secure
+      - portal
+    suffixes:
+      - secure
+      - prod
+      - eu
+      - us
+
+  automotive:
+    keywords:
+      - fleet
+      - connect
+      - vehicle
+      - telematics
+      - mobility
+      - charging
+      - ev
+      - hybrid
+      - rental
+      - lease
+      - dealer
+      - service
+      - parts
+    prefixes:
+      - fleet
+      - connect
+      - service
+      - dealer
+    suffixes:
+      - connect
+      - eu
+      - us
+      - prod

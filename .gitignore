@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# Reports (timestamped outputs)
+reports/strata-*.md
+reports/strata-*.html
+reports/strata-*.sarif
+reports/strata-*.jsonl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ruff
+.ruff_cache/

@@ -1,0 +1,46 @@
+{
+  "tools": [
+    {
+      "name": "aperture",
+      "path": "tools/aperture",
+      "role": "subdomain discovery sources",
+      "language": "go",
+      "integrated_via": "src/strata/adapters/aperture.py"
+    },
+    {
+      "name": "triage-loom",
+      "path": "tools/triage-loom",
+      "role": "triage and corroboration ranking",
+      "language": "python",
+      "integrated_via": "src/strata/adapters/triage_loom.py"
+    },
+    {
+      "name": "jsast",
+      "path": null,
+      "role": "JS endpoint extraction",
+      "language": null,
+      "integrated_via": "src/strata/adapters/jsast.py"
+    },
+    {
+      "name": "vulnharvest",
+      "path": null,
+      "role": "vulnerability/endpoint harvest",
+      "language": null,
+      "integrated_via": "src/strata/adapters/vulnharvest.py"
+    },
+    {
+      "name": "echoforge",
+      "path": "tools/echoforge",
+      "role": "evolutionary subdomain mutation engine",
+      "language": "go",
+      "integrated_via": "src/strata/engines/echoforge.py"
+    },
+    {
+      "name": "param-oracle",
+      "path": null,
+      "role": "parameter prediction and verification",
+      "language": "python",
+      "integrated_via": "src/strata/engines/param_oracle.py"
+    }
+  ]
+}

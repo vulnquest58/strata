@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "triage-loom"
+version = "1.0.0"
+description = "5-stage filter chain and investigation priority ranking for OSINT findings"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "polars>=1.0.0",
+    "httpx[http2]>=0.27.0",
+    "duckdb>=1.0.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-httpx>=0.30",
+    "mypy>=1.10",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+triage-loom = "triage_loom.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["triage_loom"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

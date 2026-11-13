@@ -1,0 +1,28 @@
+scan:
+  default_concurrency: 50
+  default_timeout: 10  # seconds
+
+sources:
+  otx_api_key: ""  # Set via OTX_API_KEY env var or here directly
+  default_prior_reliability: 0.5
+
+resolvers:
+  doh_providers:
+    - name: "Cloudflare"
+      url: "https://cloudflare-dns.com/dns-query"
+    - name: "Google"
+      url: "https://dns.google/resolve"
+    - name: "Quad9"
+      url: "https://dns.quad9.net/dns-query"
+  raw_dns_servers:
+    - "8.8.8.8:53"
+    - "1.1.1.1:53"
+    - "9.9.9.9:53"
+
+consensus:
+  temporal_stability_threshold: 0.66  # Pass if ≥2 of 3 attempts succeed
+  min_jitter_seconds: 5
+  max_jitter_seconds: 45
+
+storage:
+  database_path: "aperture.db"
