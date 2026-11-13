@@ -28,6 +28,16 @@ reports/strata-*.jsonl
 .DS_Store
 Thumbs.db
 
+# Media / screen recordings
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.png
+*.jpg
+*.jpeg
+*.gif
+
 # Pytest / coverage
 .pytest_cache/
 .coverage
