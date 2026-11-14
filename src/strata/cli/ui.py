@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TextIO
 
+from strata.core.redact import redact_url
+
 # ─────────────────────────── colour detection ──────────────────────────────
 
 def _supports_colour(stream: TextIO = sys.stderr) -> bool:
@@ -28,6 +30,18 @@ def _supports_colour(stream: TextIO = sys.stderr) -> bool:
 
 
 _COLOR = _supports_colour()
+
+# Avoid UnicodeEncodeError on legacy Windows consoles (cp1252) while keeping
+# Unicode output wherever the terminal supports it.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            if getattr(_stream, "isatty", lambda: False)():
+                _stream.reconfigure(errors="replace")
+            else:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 
 class C:
@@ -235,7 +249,7 @@ def print_findings_table(findings: list, max_rows: int = 20) -> None:
         kind   = f.kind.value.lower()
         status = f.status.value.lower()
         conf   = f.confidence.value
-        asset  = f.asset_value
+        asset  = redact_url(f.asset_value)
 
         kc = _KIND_COLOR.get(kind, C.WHITE)
         sc = _STATUS_COLOR.get(status, C.WHITE)
@@ -292,7 +306,7 @@ def print_passive_dns_results(results: list) -> None:
 def print_fingerprint_result(finding) -> None:
     """Display a single HTTP fingerprint UnifiedFinding."""
     m = finding.metadata if hasattr(finding, "metadata") else {}
-    url = finding.asset_value
+    url = redact_url(finding.asset_value)
 
     waf  = m.get("waf")
     cdn  = m.get("cdn")
@@ -362,7 +376,7 @@ def print_dns_finding(finding) -> None:
         origin = finding.evidence[0].meta.get("origin_provider", "")
     origin_s = f" {C.GRAY}[{origin}]{C.RST}" if origin else ""
     print(
-        f"  {Icon.PASS}  {C.CYAN}{finding.asset_value:<45}{C.RST}"
+        f"  {Icon.PASS}  {C.CYAN}{redact_url(finding.asset_value):<45}{C.RST}"
         f"  {cc}{conf:5.1f}%{C.RST}"
         f"  {sc}{si} {status:<9}{C.RST}"
         f"{origin_s}"

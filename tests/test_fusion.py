@@ -5,11 +5,13 @@ from strata.core.schema.models import (
     FindingStatus,
     UnifiedFinding,
 )
+from strata.core.store.db import StrataDB
 from strata.engines.fusion import (
     entity_key,
     fuse_findings,
     noisy_or_confidence,
     resolve_entities,
+    superseded_finding_ids,
 )
 
 
@@ -158,3 +160,94 @@ def test_endpoint_entity_key_normalises_url() -> None:
     assert len(fused) == 1
     assert fused[0].asset_value == "https://example.com/api/?a=2&b=1"
     assert fused[0].confidence.value == 80.0
+
+
+def test_fusion_preserves_engine_metadata() -> None:
+    first = _finding(
+        run_id="content:example.com",
+        kind=FindingClass.ENDPOINT,
+        asset_value="https://example.com/api",
+        confidence=50.0,
+        parent="example.com",
+        engine="content_crawl",
+        technique="js_extract",
+        observation="extracted",
+    ).model_copy(
+        update={"metadata": {"tech_stack": ["nginx"], "params": ["user_id"]}}
+    )
+    second = _finding(
+        run_id="fingerprint:example.com",
+        kind=FindingClass.ENDPOINT,
+        asset_value="https://example.com/api",
+        confidence=60.0,
+        parent="example.com",
+        engine="http_fp",
+        technique="header_probe",
+        observation="fingerprinted",
+    ).model_copy(
+        update={
+            "metadata": {
+                "tech_stack": ["nginx", "php"],
+                "params": ["page"],
+                "waf": "Cloudflare",
+            }
+        }
+    )
+
+    fused = fuse_findings([first, second])
+    assert len(fused) == 1
+    metadata = fused[0].metadata
+    assert metadata["tech_stack"] == ["nginx", "php"]
+    assert metadata["params"] == ["user_id", "page"]
+    assert metadata["waf"] == "Cloudflare"
+    assert metadata["source"] == "fusion"
+    assert metadata["source_count"] == 2
+
+
+def test_fusion_replaces_raw_rows_and_is_idempotent(tmp_path) -> None:
+    db_path = tmp_path / "strata.db"
+    db = StrataDB(db_path)
+    first = _finding(
+        run_id="dns:example.com",
+        kind=FindingClass.SUBDOMAIN,
+        asset_value="api.example.com",
+        confidence=40.0,
+        engine="dns_brute",
+        technique="wordlist",
+        observation="dns resolves",
+    )
+    second = _finding(
+        run_id="aperture:abc",
+        kind=FindingClass.SUBDOMAIN,
+        asset_value="api.example.com",
+        confidence=60.0,
+        engine="crtsh",
+        technique="ct",
+        observation="ct lists",
+    )
+    db.upsert_finding(first, target="example.com")
+    db.upsert_finding(second, target="example.com")
+    assert db.stats(target="example.com")["findings"] == 2
+
+    def fuse_once() -> int:
+        findings = list(db.iter_findings(target="example.com"))
+        fused = fuse_findings(findings)
+        removed = 0
+        for finding in fused:
+            db.upsert_finding(finding, target="example.com")
+            removed += db.delete_findings(superseded_finding_ids(finding))
+        return removed
+
+    assert fuse_once() == 2
+    rows = list(db.iter_findings(target="example.com"))
+    assert len(rows) == 1
+    assert rows[0].metadata["source_count"] == 2
+    assert len(rows[0].evidence) == 2
+    assert rows[0].confidence.value == 76.0
+
+    assert fuse_once() == 0
+    rows = list(db.iter_findings(target="example.com"))
+    db.close()
+    assert len(rows) == 1
+    assert rows[0].confidence.value == 76.0
+    assert rows[0].metadata["source_count"] == 2

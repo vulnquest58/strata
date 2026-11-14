@@ -46,6 +46,7 @@ class ConfidenceMethod(enum.StrEnum):
     NOISY_OR = "noisy_or"
     ML = "ml"
     IMPORTED = "imported"
+    HTTP_PROBE = "http_probe"
 
 
 def utc_now() -> datetime:

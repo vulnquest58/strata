@@ -13,11 +13,8 @@ build/
 *.db-shm
 *.db-wal
 
-# Reports (timestamped outputs)
-reports/strata-*.md
-reports/strata-*.html
-reports/strata-*.sarif
-reports/strata-*.jsonl
+# Reports (generated outputs live under reports/, never in the repo)
+reports/
 
 # IDE
 .vscode/

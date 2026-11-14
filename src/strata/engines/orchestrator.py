@@ -20,16 +20,19 @@ from strata.adapters.jsast import load_jsast_report
 from strata.adapters.passive_dns import passive_dns_to_findings, query_passive_dns
 from strata.adapters.triage_loom import load_triage_loom_jsonl
 from strata.adapters.vulnharvest import load_vulnharvest_report
+from strata.core.budget import RequestBudget
 from strata.core.config import get_config
 from strata.core.content.fetch import HttpTransport, ThrottledTransport, UrllibTransport
 from strata.core.dns.resolver import DnspythonTransport, Resolver
+from strata.core.errors import classify_exception
+from strata.core.manifest import RunManifest, manifest_path_for
 from strata.core.paths import timestamped_report_path
 from strata.core.policy.scope import ScopePolicy
 from strata.core.reporting import ReportFormat, summarise, write_report
 from strata.core.schema.models import FindingClass, is_probable_domain
 from strata.core.store.db import StrataDB
 from strata.engines.dns_brute import DnsDiscoveryEngine
-from strata.engines.fusion import fuse_findings
+from strata.engines.fusion import fuse_findings, superseded_finding_ids
 from strata.engines.http_fp import fingerprint_url
 from strata.engines.js_content import ContentDiscoveryEngine
 from strata.engines.param_oracle import ParamOracle
@@ -134,6 +137,7 @@ class StageResult:
     total_findings: int = 0
     stats: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    status: str = "ok"
 
 
 @dataclass
@@ -143,6 +147,8 @@ class RunResult:
     report_path: Path | None = None
     memory: RunMemory | None = None
     db_stats: dict[str, int] = field(default_factory=dict)
+    manifest: dict[str, Any] | None = None
+    manifest_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -167,6 +173,10 @@ class RunOptions:
     no_param: bool = False
     no_fuse: bool = False
     min_sources: int = 2
+    max_requests: int = 0           # 0 = unlimited (HTTP requests)
+    max_bytes: int = 0              # 0 = unlimited (response bytes)
+    max_seconds: float = 0.0        # 0 = unlimited (wall clock)
+    strict_stages: bool = False     # re-raise unexpected stage exceptions
     report_format: ReportFormat | str = ReportFormat.MARKDOWN
     report_out: str | Path | None = None
     title: str = "Strata run"
@@ -290,6 +300,7 @@ class Orchestrator:
         *,
         resolver: Resolver | None = None,
         transport: HttpTransport | None = None,
+        fingerprint_transport: HttpTransport | None = None,
     ):
         self._options = options
         self._target_raw = options.target
@@ -303,13 +314,63 @@ class Orchestrator:
             self._resolver = Resolver(transport)  # type: ignore[arg-type]
         else:
             self._resolver = Resolver(DnspythonTransport(timeout=options.timeout))
-        self._transport = transport or UrllibTransport()
+        self._budget = (
+            RequestBudget(
+                max_requests=options.max_requests,
+                max_bytes=options.max_bytes,
+                max_seconds=options.max_seconds,
+            )
+            if (options.max_requests or options.max_bytes or options.max_seconds)
+            else None
+        )
+        self._transport = transport or UrllibTransport(budget=self._budget)
+        self._fingerprint_transport = fingerprint_transport
         self._log = RunLog()
         self._report_path: Path | None = None
+        self._manifest = RunManifest(
+            target=self._target,
+            scope=self._scope,
+            options=self._options_snapshot(),
+        )
+
+    def _options_snapshot(self) -> dict[str, Any]:
+        options = self._options
+        keys = (
+            "wordlist",
+            "max_concurrency",
+            "timeout",
+            "max_scripts",
+            "max_probe",
+            "max_candidates",
+            "probe",
+            "robots",
+            "mutate",
+            "resume",
+            "no_dns",
+            "no_passive",
+            "no_fingerprint",
+            "no_content",
+            "no_param",
+            "no_fuse",
+            "min_sources",
+            "max_requests",
+            "max_bytes",
+            "max_seconds",
+            "strict_stages",
+            "report_format",
+            "dry_run",
+        )
+        snapshot: dict[str, Any] = {}
+        for key in keys:
+            value = getattr(options, key)
+            if isinstance(value, ReportFormat):
+                value = value.value
+            snapshot[key] = value
+        return snapshot
 
     async def run(self) -> RunResult:
         db = StrataDB(self._options.db_path)
-        stats = db.stats()
+        stats = db.stats(target=self._target)
         memory = RunMemory.from_dict(db.get_run_memory(self._target))
         suggestions = memory.suggestions()
         plan = self._build_plan(suggestions)
@@ -319,6 +380,13 @@ class Orchestrator:
         self._log.field("scope", self._scope)
         self._log.field("plan", " -> ".join(name for name, _ in plan))
         self._log.field("memory", f"{memory.runs} prior runs")
+        if self._budget is not None:
+            self._log.field(
+                "budget",
+                f"requests={self._options.max_requests or '-'} "
+                f"bytes={self._options.max_bytes or '-'} "
+                f"seconds={self._options.max_seconds or '-'}",
+            )
         if suggestions:
             self._log.insight(
                 "prior run suggests: " + ", ".join(f"{k}={v}" for k, v in suggestions.items())
@@ -332,9 +400,24 @@ class Orchestrator:
         for stage_name, _reason in plan:
             try:
                 stage_result = await self._execute(stage_name, db, memory)
-            except (ValueError, OSError, RuntimeError) as exc:
-                self._log.note(f"stage {stage_name!r} error: {exc}")
-                stage_result = None
+            except Exception as exc:
+                info = classify_exception(exc)
+                if not info.expected and self._options.strict_stages:
+                    db.close()
+                    raise
+                label = (
+                    "skipped"
+                    if info.expected and info.code != "STAGE_FAILED"
+                    else "failed"
+                )
+                note = f"stage {stage_name!r} {label} [{info.code}]: {info.message}"
+                self._log.note(note)
+                stage_result = StageResult(
+                    stage=stage_name,
+                    stats={"error_code": info.code},
+                    notes=[note],
+                    status=label,
+                )
             if stage_result is not None:
                 result.stages.append(stage_result)
                 memory.record(
@@ -344,7 +427,7 @@ class Orchestrator:
                     insight=stage_result.notes[0] if stage_result.notes else None,
                 )
 
-        final_stats = db.stats()
+        final_stats = db.stats(target=self._target)
         result.db_stats = final_stats
         result.report_path = self._report_path
         result.memory = memory
@@ -352,6 +435,33 @@ class Orchestrator:
         self._log.footer(final_stats)
         if not self._options.dry_run:
             db.save_run_memory(self._target, memory.to_dict())
+            manifest_path = (
+                manifest_path_for(self._report_path)
+                if self._report_path
+                else timestamped_report_path(
+                    prefix=f"strata-{self._target.replace('.', '-')}",
+                    extension="manifest.json",
+                )
+            )
+            self._manifest.finish(
+                stats=final_stats,
+                stages=[
+                    {
+                        "stage": stage.stage,
+                        "status": stage.status,
+                        "new_findings": stage.new_findings,
+                        "total_findings": stage.total_findings,
+                        "stats": stage.stats,
+                        "notes": stage.notes,
+                    }
+                    for stage in result.stages
+                ],
+                report=str(self._report_path) if self._report_path else None,
+                budget=self._budget.snapshot() if self._budget else None,
+            )
+            self._manifest.write(manifest_path)
+            result.manifest_path = manifest_path
+            result.manifest = self._manifest.to_dict()
         db.close()
         return result
 
@@ -400,7 +510,7 @@ class Orchestrator:
     async def _execute(
         self, stage: str, db: StrataDB, memory: RunMemory
     ) -> StageResult | None:
-        before = db.stats()
+        before = db.stats(target=self._target)
         if stage == "absorb":
             return self._stage_absorb(db, before, memory)
         if stage == "passive":
@@ -428,7 +538,7 @@ class Orchestrator:
         imported = self._import_external_findings(db)
         if imported:
             self._log.stat(f"imported={imported}")
-            before = db.stats()
+            before = db.stats(target=self._target)
         self._log.stat(_db_stats_line(before))
         notes: list[str] = []
         if imported:
@@ -468,7 +578,7 @@ class Orchestrator:
                 continue
             try:
                 for finding in loader(path):
-                    db.upsert_finding(finding)
+                    db.upsert_finding(finding, target=self._target)
                     count += 1
             except (OSError, ValueError) as exc:
                 self._log.note(f"import error: {path} ({exc})")
@@ -482,8 +592,8 @@ class Orchestrator:
         results = await query_passive_dns(self._target, config=cfg)
         findings = passive_dns_to_findings(results, policy=self._policy)
         for finding in findings:
-            db.upsert_finding(finding)
-        after = db.stats()
+            db.upsert_finding(finding, target=self._target)
+        after = db.stats(target=self._target)
         total_subs = sum(len(r.subdomains) for r in results)
         active_sources = [r.source for r in results if not r.error]
         stats = {
@@ -527,7 +637,7 @@ class Orchestrator:
         self._log.stage("fingerprint", "fingerprint live hosts (tech stack, WAF, security headers)")
         # Collect verified subdomains and seed URL
         targets: list[str] = [self._seed]
-        for finding in db.iter_findings():
+        for finding in db.iter_findings(target=self._target):
             if finding.kind is FindingClass.SUBDOMAIN:
                 targets.append(f"https://{finding.asset_value}")
         # Deduplicate, cap at 20 hosts
@@ -539,7 +649,9 @@ class Orchestrator:
                 unique.append(t)
         unique = unique[:20]
 
-        transport = ThrottledTransport(per_host_delay=0.5)
+        transport = self._fingerprint_transport or ThrottledTransport(
+            per_host_delay=0.5, budget=self._budget
+        )
         fp_findings = []
         errors = 0
         for url in unique:
@@ -550,12 +662,12 @@ class Orchestrator:
                 run_id=f"fp:{self._target}",
             )
             if fp and fp.finding:
-                db.upsert_finding(fp.finding)
+                db.upsert_finding(fp.finding, target=self._target)
                 fp_findings.append(fp)
             elif not fp:
                 errors += 1
 
-        after = db.stats()
+        after = db.stats(target=self._target)
         waf_found = [fp.waf for fp in fp_findings if fp.waf]
         tech_found = list({t for fp in fp_findings for t in fp.tech_stack})
         stats = {
@@ -593,7 +705,7 @@ class Orchestrator:
         if self._options.resume:
             known = {
                 finding.asset_value
-                for finding in db.iter_findings()
+                for finding in db.iter_findings(target=self._target)
                 if finding.kind is FindingClass.SUBDOMAIN
             }
         engine = DnsDiscoveryEngine(
@@ -606,8 +718,8 @@ class Orchestrator:
         )
         result = await engine.run(self._target)
         for finding in result.findings:
-            db.upsert_finding(finding)
-        after = db.stats()
+            db.upsert_finding(finding, target=self._target)
+        after = db.stats(target=self._target)
         s = result.stats
         stats = {
             "tested": s.candidates_tested,
@@ -648,7 +760,7 @@ class Orchestrator:
         if self._options.resume:
             known = {
                 finding.asset_value
-                for finding in db.iter_findings()
+                for finding in db.iter_findings(target=self._target)
                 if finding.kind in (FindingClass.ENDPOINT, FindingClass.SECRET)
             }
         engine = ContentDiscoveryEngine(
@@ -663,8 +775,8 @@ class Orchestrator:
         )
         result = await engine.run(self._seed)
         for finding in result.findings:
-            db.upsert_finding(finding)
-        after = db.stats()
+            db.upsert_finding(finding, target=self._target)
+        after = db.stats(target=self._target)
         s = result.stats
         stats = {
             "pages": s.pages_fetched,
@@ -706,12 +818,12 @@ class Orchestrator:
         self._log.stage("param", reason)
         endpoints = [
             finding
-            for finding in db.iter_findings()
+            for finding in db.iter_findings(target=self._target)
             if finding.kind is FindingClass.ENDPOINT
         ]
         if not endpoints:
             self._log.note("no endpoint surface to probe")
-            after = db.stats()
+            after = db.stats(target=self._target)
             return StageResult(
                 stage="param",
                 new_findings=0,
@@ -730,8 +842,8 @@ class Orchestrator:
         )
         result = await engine.run(endpoints)
         for finding in result.findings:
-            db.upsert_finding(finding)
-        after = db.stats()
+            db.upsert_finding(finding, target=self._target)
+        after = db.stats(target=self._target)
         s = result.stats
         stats = {
             "endpoints": s.endpoints_scanned,
@@ -757,15 +869,16 @@ class Orchestrator:
 
     def _stage_fuse(self, db: StrataDB, before: dict[str, int]) -> StageResult:
         self._log.stage("fuse", "reconcile duplicate entities across engines")
-        findings = list(db.iter_findings())
+        findings = list(db.iter_findings(target=self._target))
         fused = [
             finding
             for finding in fuse_findings(findings)
             if finding.metadata.get("source_count", 1) >= self._options.min_sources
         ]
         for finding in fused:
-            db.upsert_finding(finding)
-        after = db.stats()
+            db.upsert_finding(finding, target=self._target)
+            db.delete_findings(superseded_finding_ids(finding))
+        after = db.stats(target=self._target)
         stats = {"sources": len(findings), "fused": len(fused)}
         self._log.stat(_db_stats_line(stats))
         notes: list[str] = []
@@ -785,7 +898,7 @@ class Orchestrator:
 
     def _stage_tension(self, db: StrataDB, before: dict[str, int]) -> StageResult:
         self._log.stage("tension", "score evidence tension for prioritization")
-        findings = list(db.iter_findings())
+        findings = list(db.iter_findings(target=self._target))
         summary, assessments = summarise_tension(findings)
         by_id = {assessment.finding_id: assessment for assessment in assessments}
         stamped = 0
@@ -803,7 +916,8 @@ class Orchestrator:
             metadata = dict(finding.metadata)
             metadata["tension"] = tension_meta
             db.upsert_finding(
-                finding.model_copy(update={"metadata": metadata})
+                finding.model_copy(update={"metadata": metadata}),
+                target=self._target,
             )
             stamped += 1
         stats = {
@@ -835,7 +949,7 @@ class Orchestrator:
 
     def _stage_report(self, db: StrataDB, before: dict[str, int]) -> StageResult:
         self._log.stage("report", "summarize and persist the current picture")
-        findings = list(db.iter_findings())
+        findings = list(db.iter_findings(target=self._target))
         summary = summarise(findings)
         report_path: Path | None = None
         fmt = ReportFormat(self._options.report_format)
@@ -846,7 +960,13 @@ class Orchestrator:
                 prefix=f"strata-{self._target.replace('.', '-')}",
                 extension=fmt.value,
             )
-        write_report(findings, report_path, fmt, title=self._options.title)
+        write_report(
+            findings,
+            report_path,
+            fmt,
+            title=self._options.title,
+            manifest=self._manifest.to_dict(),
+        )
         self._report_path = report_path
         self._log.stat(f"report={report_path} format={fmt.value}")
         notes = [

@@ -5,6 +5,10 @@ confidence-ranked map of the hidden surface: subdomains, live hosts, JS
 endpoints, secrets, confirmed parameters — every claim backed by evidence and
 a fused confidence score.
 
+Strata is designed as a calibrated belief engine, not a hit counter: it tracks
+what it claimed, how confident it was, what happened when the claim was tested,
+and how stable the remaining uncertainty is.
+
 ```
 strata run target.com --db target.db
 ```
@@ -24,7 +28,7 @@ absorb → passive → dns → fingerprint → content → param → fuse → te
 | **dns** | Brute-force DNS enumeration with echoforge mutation passes |
 | **fingerprint** | Detects tech stack, WAF, CDN, and security-header posture from HTTP responses |
 | **content** | Crawls HTML/JS/robots/sitemap, extracts endpoints, scans for secrets |
-| **param** | Probes endpoints for hidden parameters with baseline/test request comparison |
+| **param** | Probes endpoints for hidden parameters using baseline/test differential analysis (reflection, status, structural body change, server error) |
 | **fuse** | Merges duplicate entities across engines using noisy-OR confidence |
 | **tension** | Scores how unstable each claim is; labels findings as `hot`, `ghost`, `shadow`, or `stable` |
 | **report** | Writes Markdown, HTML, SARIF 2.1.0, or JSONL output |
@@ -60,14 +64,48 @@ strata dns target.com --db target.db --wordlist common
 strata content https://target.com --db target.db
 
 # Tension analysis
-strata tension --db target.db
+strata tension --db target.db --target target.com
+
+# Confidence calibration (Brier score, log loss, reliability bands)
+strata calibrate --db target.db --target target.com
 
 # Generate HTML report
-strata report --db target.db --format html --out report.html
+strata report --db target.db --target target.com --format html --out report.html
 
 # SARIF for CI/CD
-strata report --db target.db --format sarif --out results.sarif
+strata report --db target.db --target target.com --format sarif --out results.sarif
 ```
+
+### Target isolation
+
+Findings are tagged with the target that produced them. Read commands accept
+`--target` so a shared database never leaks one engagement's surface into
+another's report:
+
+```bash
+strata stats --db all.db --target target.com
+strata list  --db all.db --target target.com
+strata report --db all.db --target target.com --out target.md
+```
+
+When a database contains multiple targets and no `--target` is given, Strata
+prints an explicit warning and shows all targets. Use one database per
+engagement for hard isolation.
+
+### Budgets and run manifests
+
+```bash
+strata run target.com --db target.db \
+  --max-requests 5000 \
+  --max-bytes 50000000 \
+  --max-seconds 900
+```
+
+Budgets are enforced across HTTP stages. Every run also writes a sidecar
+manifest next to the report (`*.manifest.json`) containing the version, target,
+scope, options, stage timings, request/byte counts, and finished-at timestamp.
+`--strict-stages` re-raises unexpected stage errors instead of recording them
+and continuing.
 
 ---
 
@@ -175,7 +213,55 @@ how unstable each claim is and classifies it:
 | `stable` | Verified or well-supported | Done |
 
 ```bash
-strata tension --db target.db
+strata tension --db target.db --target target.com
+```
+
+The scoring is intentionally transparent: candidate/stale status, single-source
+evidence, absence of a live probe, high confidence without verification, and
+dead findings with residual confidence all raise tension. Reports are written
+to `reports/strata-tension-{target}-{timestamp}.md`.
+
+---
+
+## Confidence Calibration
+
+Tension tells you what is unstable. Calibration tells you whether confidence
+means anything. Every status transition into `verified` or `dead` is recorded
+as an outcome in the truth ledger; a probe that resolves an extraction
+candidate also records the candidate's pre-probe confidence. Imported claims
+that arrive already verified stay out of the ledger because they carry no prior
+prediction. `strata calibrate` then reports:
+
+- **Brier score** — mean squared error of predicted confidence
+- **Log loss** — penalty for confident mistakes
+- **Accuracy** — share of outcomes that resolved as predicted
+- **Reliability bands** — predicted confidence vs observed outcome rate
+
+```bash
+strata calibrate --db target.db --target target.com
+```
+
+Calibration improves as the pipeline verifies more claims. An empty ledger is
+reported honestly rather than hidden. Reports are written to
+`reports/strata-calibration-{target}-{timestamp}.md`.
+
+---
+
+## Benchmarking
+
+`strata.eval.benchmark` scores findings against an explicit golden surface and
+returns precision, recall, F1, and per-kind breakdowns. The test suite includes
+an offline golden-surface run so changes can be compared on receipts rather
+than anecdote:
+
+```python
+from strata.eval.benchmark import score_findings
+
+score = score_findings(findings, {
+    "subdomain:www.example.com",
+    "endpoint:https://example.com/api/users?user_id=1",
+})
+print(score.as_dict())
 ```
 
 ---
@@ -210,10 +296,11 @@ Bundled companion tools under `tools/`:
 ```
 strata run             Full pipeline on one target
 strata dns             DNS brute-force only
-strata verify          Re-resolve stored candidates → verified/dead
+strata verify          Re-resolve stored candidates to verified/dead
 strata content         JS/robots/sitemap content discovery
 strata fuse            Fuse duplicate entities across runs
 strata tension         Evidence tension analysis
+strata calibrate       Confidence calibration from outcomes
 strata report          Render findings as MD/HTML/SARIF/JSONL
 strata stats           Database statistics
 strata list            List stored findings
@@ -241,8 +328,8 @@ Reports are written to `reports/strata-{target}-{timestamp}.{ext}` by default.
 ## CI/CD Integration
 
 ```bash
-# Exit non-zero if any finding survives the report
-strata report --db target.db --format sarif --out results.sarif --strict
+# Write SARIF for GitHub Code Scanning
+strata report --db target.db --target target.com --format sarif --out results.sarif
 
 # Upload to GitHub Code Scanning
 gh api repos/{owner}/{repo}/code-scanning/sarifs \
@@ -272,6 +359,11 @@ src/strata/
   core/dns/             Resolver, wildcard detection, origin inference
   core/content/         URL canonicalization, secret detection, HTTP transport
   core/reporting/       HTML/Markdown/SARIF/JSONL rendering
+  core/errors.py        Typed error taxonomy and stage classification
+  core/budget.py        Request/byte/time budget enforcement
+  core/redact.py        URL credential and secret redaction
+  core/manifest.py      Run manifest generation and sidecar paths
+  eval/                 Golden-surface precision/recall scoring
   engines/
     dns_brute.py        Brute-force DNS with echoforge mutations
     http_fp.py          HTTP fingerprinting (WAF/tech/CDN/headers)

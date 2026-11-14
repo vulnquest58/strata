@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from strata.core.content.fetch import FetchResponse, HttpTransport, decode_body
@@ -25,6 +26,21 @@ from strata.core.schema.models import (
 )
 
 PROBE_VALUE_PREFIX = "PARAMORACLE_PROBE_"
+_BODY_COMPARE_LIMIT = 200_000
+_STRUCTURAL_CHANGE_RATIO = 0.995
+_STRUCTURAL_CHANGE_MIN_DELTA = 16
+
+
+def _normalise_body(response: FetchResponse) -> str:
+    text = decode_body(response, limit=_BODY_COMPARE_LIMIT)
+    return " ".join(text.split())
+
+
+def _body_similarity(baseline: str, test: str) -> float:
+    if not baseline and not test:
+        return 1.0
+    return SequenceMatcher(None, baseline, test, autojunk=False).quick_ratio()
+
 
 
 @dataclass
@@ -174,7 +190,19 @@ class ParamOracle:
             return "probe_value_reflection", True
         if status_changed and baseline.status >= 400 and test.status < 400:
             return "status_change", True
+        if test.status >= 500 and baseline.status < 500:
+            return "server_error_divergence", False
+        if baseline.status == test.status and self._structural_change(baseline, test):
+            return "content_change_candidate", False
         return "no_signal", False
+
+    @staticmethod
+    def _structural_change(baseline: FetchResponse, test: FetchResponse) -> bool:
+        before = _normalise_body(baseline)
+        after = _normalise_body(test)
+        if abs(len(before) - len(after)) < _STRUCTURAL_CHANGE_MIN_DELTA:
+            return False
+        return _body_similarity(before, after) < _STRUCTURAL_CHANGE_RATIO
 
     def _to_finding(
         self,
@@ -187,14 +215,37 @@ class ParamOracle:
         test: FetchResponse,
     ) -> UnifiedFinding:
         host = host_of(endpoint.asset_value)
-        confidence_value = (
-            90.0
-            if method == "probe_value_reflection"
-            else 80.0
-            if method == "status_change"
-            else 35.0
-        )
+        confidence_value = {
+            "probe_value_reflection": 90.0,
+            "status_change": 80.0,
+            "content_change_candidate": 55.0,
+            "server_error_divergence": 50.0,
+        }.get(method, 35.0)
         status = FindingStatus.VERIFIED if confirmed else FindingStatus.CANDIDATE
+        similarity = (
+            round(
+                _body_similarity(_normalise_body(baseline), _normalise_body(test)),
+                4,
+            )
+            if method == "content_change_candidate"
+            else None
+        )
+        components = {
+            "param_reflection": 90.0 if method == "probe_value_reflection" else 0.0,
+            "status_change": 80.0 if method == "status_change" else 0.0,
+            "content_change": 55.0 if method == "content_change_candidate" else 0.0,
+            "server_error": 50.0 if method == "server_error_divergence" else 0.0,
+            "interest_score": float(endpoint.confidence.value),
+        }
+        evidence_meta = {
+            "endpoint": endpoint.asset_value,
+            "candidate": candidate,
+            "baseline_status": baseline.status,
+            "test_status": test.status,
+            "confirmed": confirmed,
+        }
+        if similarity is not None:
+            evidence_meta["body_similarity"] = similarity
         return UnifiedFinding(
             run_id=f"param:{host}",
             kind=FindingClass.PARAM,
@@ -204,11 +255,7 @@ class ParamOracle:
             confidence=Confidence(
                 value=confidence_value,
                 method=ConfidenceMethod.BAYESIAN,
-                components={
-                    "param_reflection": 90.0 if method == "probe_value_reflection" else 0.0,
-                    "status_change": 80.0 if method == "status_change" else 0.0,
-                    "interest_score": float(endpoint.confidence.value),
-                },
+                components=components,
             ),
             evidence=[
                 Evidence(
@@ -218,22 +265,13 @@ class ParamOracle:
                         f"parameter '{param}' on {endpoint.asset_value} ({method})"
                     ),
                     strength=EvidenceStrength.STRONG if confirmed else EvidenceStrength.WEAK,
-                    meta={
-                        "endpoint": endpoint.asset_value,
-                        "candidate": candidate,
-                        "baseline_status": baseline.status,
-                        "test_status": test.status,
-                        "confirmed": confirmed,
-                    },
+                    meta=evidence_meta,
                 )
             ],
             metadata={
-                "endpoint": endpoint.asset_value,
+                **evidence_meta,
                 "source": "param_oracle",
-                "candidate": candidate,
-                "baseline_status": baseline.status,
-                "test_status": test.status,
                 "method": method,
-                "confirmed": confirmed,
+                "body_similarity": similarity,
             },
         )

@@ -113,3 +113,44 @@ def test_write_report_creates_each_format(tmp_path: Path) -> None:
         assert summary.findings == 1
         assert path.exists()
         assert path.stat().st_size > 0
+
+
+def test_reports_include_tension_and_manifest() -> None:
+    finding = _finding(
+        asset_value="a.example.com",
+        metadata={"tension": {"score": 85, "label": "hot", "reasons": ["unverified"]}},
+    )
+    manifest = {
+        "strata_version": "0.3.3",
+        "target": "example.com",
+        "scope": "example.com",
+        "fingerprint": "abc123",
+        "budget": {"requests": 4, "bytes_used": 120, "elapsed": 0.5},
+    }
+    markdown = markdown_report([finding], manifest=manifest)
+    assert "Evidence tension" in markdown
+    assert "| hot |" in markdown
+    assert "Run manifest" in markdown
+    assert "abc123" in markdown
+
+    html = html_report([finding], manifest=manifest)
+    assert "Evidence tension" in html
+    assert "Run manifest" in html
+    assert "abc123" in html
+
+
+def test_sarif_redacts_credentials_in_locations() -> None:
+    finding = _finding(
+        asset_value="https://user:pass@example.com/api?token=secret",
+        kind=FindingClass.ENDPOINT,
+        confidence=90.0,
+        parent="example.com",
+    )
+    report = sarif_report([finding])
+    uri = report["runs"][0]["results"][0]["locations"][0][
+        "physicalLocation"
+    ]["artifactLocation"]["uri"]
+    assert "user" not in uri
+    assert "pass" not in uri
+    assert "secret" not in uri
+    assert "token=***" in uri

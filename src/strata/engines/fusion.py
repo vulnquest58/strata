@@ -68,8 +68,6 @@ def resolve_entities(
 ) -> list[EntityGroup]:
     grouped: dict[tuple[FindingClass, str], list[UnifiedFinding]] = defaultdict(list)
     for finding in findings:
-        if _is_fusion_finding(finding):
-            continue
         grouped[(finding.kind, entity_key(finding))].append(finding)
 
     groups: list[EntityGroup] = []
@@ -146,20 +144,80 @@ def _fused_status(members: tuple[UnifiedFinding, ...]) -> FindingStatus:
     return FindingStatus.CANDIDATE
 
 
-def _fused_components(members: tuple[UnifiedFinding, ...]) -> dict[str, float]:
+def _signal_components(finding: UnifiedFinding) -> dict[str, float]:
+    """Flatten a finding into independent confidence signals.
+
+    Prior fusion findings already contain their source signals; reusing those
+    keys prevents double-counting when an entity is fused again after new
+    evidence arrives.
+    """
+    if _is_fusion_finding(finding):
+        return {
+            str(key): float(value)
+            for key, value in finding.confidence.components.items()
+            if isinstance(value, (int, float))
+        }
+    engine = next((e.engine for e in finding.evidence if e.engine), finding.run_id)
+    return {f"{engine}:{finding.run_id}": finding.confidence.value}
+
+
+def _collect_components(members: tuple[UnifiedFinding, ...]) -> dict[str, float]:
     components: dict[str, float] = {}
-    used: set[str] = set()
-    for _index, member in enumerate(members, start=1):
-        engine = next((e.engine for e in member.evidence if e.engine), member.run_id)
-        base = f"{engine}:{member.run_id}"
-        key = base
-        suffix = 1
-        while key in used:
-            suffix += 1
-            key = f"{base}#{suffix}"
-        used.add(key)
-        components[key] = member.confidence.value
+    for member in members:
+        for key, value in _signal_components(member).items():
+            components.setdefault(key, value)
     return components
+
+
+def _source_finding_ids(members: tuple[UnifiedFinding, ...]) -> list[str]:
+    ids: list[str] = []
+    for member in members:
+        prior = member.metadata.get("source_finding_ids")
+        if _is_fusion_finding(member) and isinstance(prior, list):
+            ids.extend(str(item) for item in prior)
+        else:
+            ids.append(member.finding_id)
+    return sorted(set(ids))
+
+
+def _source_runs(members: tuple[UnifiedFinding, ...]) -> list[str]:
+    runs: set[str] = set()
+    for member in members:
+        prior = member.metadata.get("source_runs")
+        if _is_fusion_finding(member) and isinstance(prior, list):
+            runs.update(str(item) for item in prior)
+        else:
+            runs.add(member.run_id)
+    return sorted(runs)
+
+
+def _merge_metadata(members: tuple[UnifiedFinding, ...]) -> dict[str, object]:
+    """Preserve engine metadata (tech stack, params, headers) through fusion."""
+    internal = {
+        "source",
+        "entity_key",
+        "source_count",
+        "source_runs",
+        "source_finding_ids",
+    }
+    merged: dict[str, object] = {}
+    for member in members:
+        for key, value in member.metadata.items():
+            if key in internal:
+                continue
+            if key not in merged:
+                merged[key] = value
+            elif isinstance(merged[key], list) and isinstance(value, list):
+                seen = {str(item) for item in merged[key]}
+                merged[key] = [
+                    *merged[key],
+                    *(item for item in value if str(item) not in seen),
+                ]
+    return merged
+
+
+def _fused_components(members: tuple[UnifiedFinding, ...]) -> dict[str, float]:
+    return _collect_components(members)
 
 
 def fuse_group(group: EntityGroup) -> UnifiedFinding:
@@ -172,18 +230,26 @@ def fuse_group(group: EntityGroup) -> UnifiedFinding:
     if group.kind is FindingClass.ENDPOINT and not parent:
         parent = host_of(asset_value) or None
 
-    if len(members) == 1:
+    components = _collect_components(members)
+    if len(members) == 1 and not _is_fusion_finding(members[0]):
         source = members[0]
         confidence = Confidence(
             value=source.confidence.value,
             method=source.confidence.method,
             components=dict(source.confidence.components),
         )
+    elif len(components) <= 1:
+        value = next(iter(components.values()), 0.0)
+        confidence = Confidence(
+            value=value,
+            method=ConfidenceMethod.NOISY_OR,
+            components=components,
+        )
     else:
         confidence = Confidence(
-            value=noisy_or_confidence(m.confidence.value for m in members),
+            value=noisy_or_confidence(components.values()),
             method=ConfidenceMethod.NOISY_OR,
-            components=_fused_components(members),
+            components=components,
         )
 
     return UnifiedFinding(
@@ -199,11 +265,12 @@ def fuse_group(group: EntityGroup) -> UnifiedFinding:
         discovered_at=min(members, key=_finding_order).discovered_at,
         legacy=members[0].legacy,
         metadata={
+            **_merge_metadata(members),
             "source": FUSION_SOURCE,
             "entity_key": group.key,
-            "source_count": len(members),
-            "source_runs": sorted({member.run_id for member in members}),
-            "source_finding_ids": [member.finding_id for member in members],
+            "source_count": len(components),
+            "source_runs": _source_runs(members),
+            "source_finding_ids": _source_finding_ids(members),
         },
     )
 
@@ -213,6 +280,14 @@ def fuse_findings(
 ) -> list[UnifiedFinding]:
     """Fuse every resolved entity, including singleton groups."""
     return [fuse_group(group) for group in resolve_entities(findings)]
+
+
+def superseded_finding_ids(fused: UnifiedFinding) -> list[str]:
+    """Raw finding IDs replaced by this fused entity (never the fused row)."""
+    ids = fused.metadata.get("source_finding_ids")
+    if not isinstance(ids, list):
+        return []
+    return [str(item) for item in ids if str(item) != fused.finding_id]
 
 
 def strongest_evidence_strength(
@@ -240,4 +315,5 @@ __all__ = [
     "noisy_or_confidence",
     "resolve_entities",
     "strongest_evidence_strength",
+    "superseded_finding_ids",
 ]

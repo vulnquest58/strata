@@ -455,6 +455,7 @@ class ContentDiscoveryEngine:
                 )
             )
             finding.metadata["probe_status"] = status
+            finding.metadata["prior_confidence"] = finding.confidence.value
             if 200 <= status < 400:
                 finding.status = FindingStatus.VERIFIED
                 result.stats.verified += 1

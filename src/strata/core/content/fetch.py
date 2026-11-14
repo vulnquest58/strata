@@ -10,15 +10,19 @@ of UrllibTransport; use it for any external scan to avoid bans.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import itertools
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
+
+from strata.core.budget import RequestBudget
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -59,13 +63,26 @@ class UrllibTransport:
     """Stdlib HTTP client: follows redirects, returns error responses instead
     of raising for 4xx/5xx, and caps the body size."""
 
-    def __init__(self, user_agent: str = DEFAULT_USER_AGENT):
+    def __init__(
+        self,
+        user_agent: str = DEFAULT_USER_AGENT,
+        *,
+        budget: RequestBudget | None = None,
+    ):
         self._user_agent = user_agent
+        self._budget = budget
 
     async def get(
         self, url: str, *, timeout: float = 10.0, max_bytes: int = 2_000_000
     ) -> FetchResponse:
-        return await asyncio.to_thread(self._get, url, timeout, max_bytes)
+        if self._budget is not None:
+            self._budget.before_request()
+        response = await asyncio.to_thread(self._get, url, timeout, max_bytes)
+        wire_bytes = len(response.body)
+        response = _decoded_response(response, max_bytes)
+        if self._budget is not None:
+            self._budget.record_bytes(wire_bytes)
+        return response
 
     def _get(self, url: str, timeout: float, max_bytes: int) -> FetchResponse:
         request = urllib.request.Request(
@@ -74,8 +91,8 @@ class UrllibTransport:
                 "User-Agent": self._user_agent,
                 "Accept": "text/html,application/javascript,application/json,text/plain,*/*",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "close",
             },
         )
         try:
@@ -110,6 +127,7 @@ class ThrottledTransport:
         user_agents: pool of UA strings rotated per request (round-robin).
         proxy: optional HTTP/SOCKS5 proxy URL.
         max_retries: retry count on connection errors (not on 4xx/5xx).
+        budget: optional request/byte/time budget enforced per attempt.
     """
 
     def __init__(
@@ -119,11 +137,13 @@ class ThrottledTransport:
         user_agents: list[str] | None = None,
         proxy: str | None = None,
         max_retries: int = 2,
+        budget: RequestBudget | None = None,
     ) -> None:
         self._delay = per_host_delay
         self._ua_cycle = itertools.cycle(user_agents or _DEFAULT_UA_POOL)
         self._proxy = proxy
         self._max_retries = max_retries
+        self._budget = budget
         # host → last request time (epoch float); protected by an asyncio lock
         self._last: dict[str, float] = defaultdict(float)
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -157,10 +177,17 @@ class ThrottledTransport:
         await self._throttle(host)
         ua = self._next_ua()
         for attempt in range(self._max_retries + 1):
+            if self._budget is not None:
+                self._budget.before_request()
             try:
-                return await asyncio.to_thread(
+                response = await asyncio.to_thread(
                     self._get_sync, url, timeout, max_bytes, ua
                 )
+                wire_bytes = len(response.body)
+                response = _decoded_response(response, max_bytes)
+                if self._budget is not None:
+                    self._budget.record_bytes(wire_bytes)
+                return response
             except (urllib.error.URLError, OSError, TimeoutError):
                 if attempt == self._max_retries:
                     # Return a synthetic 0-status response so callers don't crash
@@ -201,7 +228,31 @@ class ThrottledTransport:
             )
 
 
-def decode_body(response: FetchResponse) -> str:
+def _decoded_response(response: FetchResponse, max_bytes: int) -> FetchResponse:
+    """Inflate gzip/deflate bodies so every consumer sees real content."""
+    encoding = response.headers.get("content-encoding", "").lower().strip()
+    if not encoding or encoding == "identity":
+        return response
+    body = response.body
+    try:
+        if encoding == "gzip":
+            body = gzip.decompress(body)
+        elif encoding == "deflate":
+            try:
+                body = zlib.decompress(body)
+            except zlib.error:
+                body = zlib.decompress(body, -zlib.MAX_WBITS)
+        else:
+            return response
+    except (OSError, EOFError, zlib.error):
+        return response
+    headers = dict(response.headers)
+    headers.pop("content-encoding", None)
+    headers.pop("content-length", None)
+    return replace(response, headers=headers, body=body[:max_bytes])
+
+
+def decode_body(response: FetchResponse, *, limit: int | None = None) -> str:
     charset = "utf-8"
     content_type = response.headers.get("content-type", "")
     for part in content_type.split(";")[1:]:
@@ -209,7 +260,8 @@ def decode_body(response: FetchResponse) -> str:
         if part.lower().startswith("charset="):
             charset = part.split("=", 1)[1].strip().strip('"')
             break
+    payload = response.body if limit is None else response.body[:limit]
     try:
-        return response.body.decode(charset, errors="replace")
+        return payload.decode(charset, errors="replace")
     except LookupError:
-        return response.body.decode("utf-8", errors="replace")
+        return payload.decode("utf-8", errors="replace")

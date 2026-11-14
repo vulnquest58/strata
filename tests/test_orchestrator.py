@@ -38,6 +38,8 @@ async def test_orchestrator_runs_pipeline_and_learns(tmp_path: Path) -> None:
         max_scripts=5,
         max_probe=10,
         max_candidates=10,
+        no_fingerprint=True,
+        no_passive=True,
     )
     resolver = Resolver(StubTransport(_dns_table()))
     # The real test builds concrete responses in a follow-up test file.
@@ -71,6 +73,12 @@ async def test_orchestrator_runs_pipeline_and_learns(tmp_path: Path) -> None:
 
     assert result.report_path == report_path
     assert report_path.exists()
+    assert result.manifest_path == report_path.with_name("report.manifest.json")
+    assert result.manifest_path.exists()
+    assert result.manifest is not None
+    assert result.manifest["target"] == "example.com"
+    assert result.manifest["strata_version"]
+    assert any(stage["stage"] == "tension" for stage in result.manifest["stages"])
     db = StrataDB(db_path)
     stats = db.stats()
     db.close()
@@ -98,9 +106,12 @@ async def test_orchestrator_resumes_and_skips_known_assets(tmp_path: Path) -> No
     options = RunOptions(
         target="example.com",
         db_path=db_path,
+        report_out=tmp_path / "resume.md",
         no_content=True,
         no_param=True,
         no_fuse=True,
+        no_fingerprint=True,
+        no_passive=True,
         resume=True,
     )
     resolver = Resolver(StubTransport(_dns_table()))
@@ -129,10 +140,12 @@ async def test_orchestrator_dry_run_is_non_mutating(tmp_path: Path) -> None:
     options = RunOptions(
         target="example.com",
         db_path=db_path,
+        report_out=tmp_path / "dry-run.md",
         dry_run=True,
         no_content=True,
         no_param=True,
         no_fuse=True,
+        no_passive=True,
     )
     resolver = Resolver(StubTransport(_dns_table()))
     transport = StubHttpTransport({})
@@ -153,10 +166,13 @@ async def test_orchestrator_imports_external_findings(tmp_path: Path) -> None:
     options = RunOptions(
         target="example.com",
         db_path=db_path,
+        report_out=tmp_path / "import-aperture.md",
         no_dns=True,
         no_content=True,
         no_param=True,
         no_fuse=True,
+        no_fingerprint=True,
+        no_passive=True,
         import_aperture=fixture,
     )
     resolver = Resolver(StubTransport(_dns_table()))
@@ -177,10 +193,13 @@ async def test_orchestrator_imports_triage_loom_findings(tmp_path: Path) -> None
     options = RunOptions(
         target="example.com",
         db_path=db_path,
+        report_out=tmp_path / "import-triage.md",
         no_dns=True,
         no_content=True,
         no_param=True,
         no_fuse=True,
+        no_fingerprint=True,
+        no_passive=True,
         import_triage_loom=fixture,
     )
     resolver = Resolver(StubTransport(_dns_table()))
@@ -193,3 +212,37 @@ async def test_orchestrator_imports_triage_loom_findings(tmp_path: Path) -> None
     assert stats["findings"] >= 2
     assert result.stages[0].stage == "absorb"
     assert result.stages[0].new_findings >= 2
+
+
+async def test_stage_failure_is_contained_and_audited(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "strata.db"
+    report_path = tmp_path / "report.md"
+    options = RunOptions(
+        target="example.com",
+        db_path=db_path,
+        report_out=report_path,
+        no_param=True,
+        no_fuse=True,
+        no_fingerprint=True,
+        no_passive=True,
+    )
+    orchestrator = Orchestrator(
+        options,
+        resolver=Resolver(StubTransport(_dns_table())),
+        transport=StubHttpTransport({}),
+    )
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("synthetic content failure")
+
+    monkeypatch.setattr(orchestrator, "_stage_content", boom)
+    result = await orchestrator.run()
+
+    assert report_path.exists()
+    assert result.manifest is not None
+    failed = [s for s in result.manifest["stages"] if s["stage"] == "content"]
+    assert failed and failed[0]["status"] == "failed"
+    assert failed[0]["stats"]["error_code"] == "STAGE_FAILED"
+    assert any(stage.stage == "report" for stage in result.stages)

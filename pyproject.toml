@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "strata"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Unified attack-surface intelligence engine: DNS discovery, content extraction, and hidden-surface prediction under one evidence model"
 readme = "README.md"
 license = "MIT"
@@ -39,6 +39,9 @@ strata = "strata.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "strata.__version__" }
 
 [tool.setuptools.package-data]
 strata = ["data/wordlists/*.txt", "core/dns/data/*.json"]

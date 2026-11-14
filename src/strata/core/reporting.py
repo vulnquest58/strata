@@ -13,7 +13,9 @@ from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from strata.core.redact import redact_url
 from strata.core.schema.models import UnifiedFinding
 
 
@@ -86,9 +88,14 @@ def _confidence_buckets(items: Iterable[UnifiedFinding]) -> list[tuple[str, int]
     return list(buckets.items())
 
 
-def _tension_buckets(
-    items: Iterable[UnifiedFinding],
-) -> list[tuple[str, int]]:
+def _safe_asset(finding: UnifiedFinding) -> str:
+    value = finding.asset_value
+    if value.startswith(("http://", "https://")):
+        return redact_url(value)
+    return value
+
+
+def _tension_buckets(items: Iterable[UnifiedFinding]) -> list[tuple[str, int]]:
     labels = ["hot", "ghost", "shadow", "stable"]
     counts = {label: 0 for label in labels}
     for finding in items:
@@ -99,6 +106,34 @@ def _tension_buckets(
         if label in counts:
             counts[label] += 1
     return [(label, counts[label]) for label in labels]
+
+
+def _manifest_rows(manifest: dict[str, Any]) -> list[tuple[str, str]]:
+    keys = (
+        "strata_version",
+        "schema_version",
+        "target",
+        "scope",
+        "started_at",
+        "finished_at",
+        "fingerprint",
+    )
+    rows = []
+    for key in keys:
+        value = manifest.get(key)
+        if value is not None:
+            rows.append((key, str(value)))
+    budget = manifest.get("budget")
+    if isinstance(budget, dict):
+        rows.append(
+            (
+                "budget",
+                f"requests={budget.get('requests', 0)} "
+                f"bytes={budget.get('bytes_used', 0)} "
+                f"elapsed={budget.get('elapsed', 0)}s",
+            )
+        )
+    return rows
 
 
 def _confidence_level(finding: UnifiedFinding) -> str:
@@ -123,21 +158,22 @@ def _location(finding: UnifiedFinding) -> dict | None:
     start_line = int(line) if isinstance(line, int) and line > 0 else 1
     return {
         "physicalLocation": {
-            "artifactLocation": {"uri": url},
+            "artifactLocation": {"uri": redact_url(url)},
             "region": {"startLine": start_line},
         }
     }
 
 
 def sarif_report(findings: Iterable[UnifiedFinding]) -> dict:
+    items = _ordered(findings)
     results: list[dict] = []
-    for finding in _ordered(findings):
+    for finding in items:
         result: dict = {
             "ruleId": finding.kind.value,
             "level": _confidence_level(finding),
             "message": {
                 "text": (
-                    f"{finding.kind.value} {finding.asset_value} "
+                    f"{finding.kind.value} {_safe_asset(finding)} "
                     f"({finding.status.value}, confidence={finding.confidence.value:.1f})"
                 )
             },
@@ -163,7 +199,7 @@ def sarif_report(findings: Iterable[UnifiedFinding]) -> dict:
                         "informationUri": "https://github.com/vulnquest58",
                         "rules": [
                             {"id": kind}
-                            for kind in sorted({f.kind.value for f in findings})
+                            for kind in sorted({f.kind.value for f in items})
                         ],
                     }
                 },
@@ -174,7 +210,10 @@ def sarif_report(findings: Iterable[UnifiedFinding]) -> dict:
 
 
 def markdown_report(
-    findings: Iterable[UnifiedFinding], *, title: str = "Strata report"
+    findings: Iterable[UnifiedFinding],
+    *,
+    title: str = "Strata report",
+    manifest: dict[str, Any] | None = None,
 ) -> str:
     items = _ordered(findings)
     summary = summarise(items)
@@ -219,6 +258,19 @@ def markdown_report(
     )
     for label, count in _tension_buckets(items):
         lines.append(f"| {label} | {count} |")
+    if manifest:
+        lines.extend(
+            [
+                "",
+                "## Run manifest",
+                "",
+                "| Field | Value |",
+                "|---|---|",
+            ]
+        )
+        for key, value in _manifest_rows(manifest):
+            safe_value = str(value).replace("|", "\\|")
+            lines.append(f"| {key} | {safe_value} |")
     lines.extend(
         [
             "",
@@ -229,7 +281,7 @@ def markdown_report(
         ]
     )
     for finding in items:
-        asset = finding.asset_value.replace("|", "\\|")
+        asset = _safe_asset(finding).replace("|", "\\|")
         lines.append(
             f"| {finding.confidence.value:.1f} | {finding.status.value} | "
             f"{finding.kind.value} | {asset} | {len(finding.evidence)} | "
@@ -247,7 +299,7 @@ def _html_row(finding: UnifiedFinding) -> str:
         f"<td><span class=\"badge badge-{html.escape(finding.status.value)}\">"
         f"{html.escape(finding.status.value)}</span></td>"
         f"<td>{html.escape(finding.kind.value)}</td>"
-        f"<td><code>{html.escape(finding.asset_value)}</code></td>"
+        f"<td><code>{html.escape(_safe_asset(finding))}</code></td>"
         f"<td class=\"num\">{len(finding.evidence)}</td>"
         f"<td class=\"num\">{_source_count(finding)}</td>"
         "</tr>"
@@ -255,7 +307,10 @@ def _html_row(finding: UnifiedFinding) -> str:
 
 
 def html_report(
-    findings: Iterable[UnifiedFinding], *, title: str = "Strata report"
+    findings: Iterable[UnifiedFinding],
+    *,
+    title: str = "Strata report",
+    manifest: dict[str, Any] | None = None,
 ) -> str:
     items = _ordered(findings)
     summary = summarise(items)
@@ -272,6 +327,21 @@ def html_report(
         f"<tr><td>{html.escape(label)}</td><td class=\"num\">{count}</td></tr>"
         for label, count in _tension_buckets(items)
     )
+    manifest_rows = "".join(
+        f"<tr><td>{html.escape(key)}</td><td><code>{html.escape(value)}</code></td></tr>"
+        for key, value in _manifest_rows(manifest or {})
+    )
+    manifest_section = ""
+    if manifest:
+        manifest_section = (
+            "<h2>Run manifest</h2>\n"
+            "<table>\n"
+            "<thead><tr><th>Field</th><th>Value</th></tr></thead>\n"
+            "<tbody>\n"
+            f"{manifest_rows}\n"
+            "</tbody>\n"
+            "</table>"
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -333,6 +403,7 @@ code {{ font-size: 0.85rem; word-break: break-all; }}
 {tension_rows}
 </tbody>
 </table>
+{manifest_section}
 <h2>Findings</h2>
 <table>
 <thead>
@@ -364,6 +435,7 @@ def write_report(
     fmt: ReportFormat | str,
     *,
     title: str = "Strata report",
+    manifest: dict[str, Any] | None = None,
 ) -> ReportSummary:
     items = _ordered(findings)
     summary = summarise(items)
@@ -373,11 +445,15 @@ def write_report(
     format_value = ReportFormat(fmt)
     if format_value is ReportFormat.HTML:
         output.write_text(
-            html_report(items, title=title), encoding="utf-8", newline="\n"
+            html_report(items, title=title, manifest=manifest),
+            encoding="utf-8",
+            newline="\n",
         )
     elif format_value is ReportFormat.MARKDOWN:
         output.write_text(
-            markdown_report(items, title=title), encoding="utf-8", newline="\n"
+            markdown_report(items, title=title, manifest=manifest),
+            encoding="utf-8",
+            newline="\n",
         )
     elif format_value is ReportFormat.SARIF:
         output.write_text(

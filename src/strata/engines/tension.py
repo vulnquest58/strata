@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from strata.core.redact import redact_url
 from strata.core.schema.models import FindingStatus, UnifiedFinding
 
 _LIVE_ENGINES = {"content_probe", "dns_verify", "param_oracle"}
@@ -193,7 +194,10 @@ def tension_markdown(
         ]
     )
     for assessment in items:
-        asset = assessment.asset_value.replace("|", "\\|")
+        asset = assessment.asset_value
+        if asset.startswith(("http://", "https://")):
+            asset = redact_url(asset)
+        asset = asset.replace("|", "\\|")
         reasons = "; ".join(assessment.reasons).replace("|", "\\|")
         lines.append(
             f"| {assessment.score} | {assessment.label} | {assessment.confidence:.1f} | "
