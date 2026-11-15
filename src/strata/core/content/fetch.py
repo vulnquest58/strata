@@ -68,9 +68,11 @@ class UrllibTransport:
         user_agent: str = DEFAULT_USER_AGENT,
         *,
         budget: RequestBudget | None = None,
+        extra_headers: Mapping[str, str] | None = None,
     ):
         self._user_agent = user_agent
         self._budget = budget
+        self._extra_headers = dict(extra_headers or {})
 
     async def get(
         self, url: str, *, timeout: float = 10.0, max_bytes: int = 2_000_000
@@ -93,6 +95,7 @@ class UrllibTransport:
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate",
                 "Connection": "close",
+                **self._extra_headers,
             },
         )
         try:
@@ -138,12 +141,14 @@ class ThrottledTransport:
         proxy: str | None = None,
         max_retries: int = 2,
         budget: RequestBudget | None = None,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> None:
         self._delay = per_host_delay
         self._ua_cycle = itertools.cycle(user_agents or _DEFAULT_UA_POOL)
         self._proxy = proxy
         self._max_retries = max_retries
         self._budget = budget
+        self._extra_headers = dict(extra_headers or {})
         # host → last request time (epoch float); protected by an asyncio lock
         self._last: dict[str, float] = defaultdict(float)
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -207,6 +212,7 @@ class ThrottledTransport:
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate",
                 "Connection": "close",
+                **self._extra_headers,
             },
         )
         try:

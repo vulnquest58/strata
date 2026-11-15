@@ -245,6 +245,172 @@ Calibration improves as the pipeline verifies more claims. An empty ledger is
 reported honestly rather than hidden. Reports are written to
 `reports/strata-calibration-{target}-{timestamp}.md`.
 
+Calibration also scores the sources themselves: each outcome is attributed to
+the discovery engines behind its claim, and `strata calibrate` reports each
+source's observed verify rate. A source that keeps dying on claims the rest of
+the pool verifies is flagged as possibly poisoned or low quality, and fusion
+can down-weight it on the next run.
+
+---
+
+## Self-Calibrating Beliefs
+
+Three mechanisms make confidence sharper every run, without any manual tuning:
+
+- **Belief half-life** — unverified claims decay over time (candidate claims
+  halve every 30 days, verified claims every 90; dead claims never decay).
+  The tension engine reports effective confidence and claim age, so a
+  subdomain believed at 80% a year ago is surfaced as what it is now: a guess.
+- **Self-calibrating wordlists** — DNS brute-force records per-word
+  attempts/successes across runs. Later runs probe historically productive
+  words first, so the same wordlist finds more per request. Data stays in the
+  local database.
+- **Information-gain probing** — content probes are scheduled by expected
+  bits of entropy: a claim at 50% confidence resolves twice the information
+  of one at 90%, so the most uncertain claims are verified first.
+
+---
+
+## Surface Coverage Estimation
+
+How much of the surface are you still missing? Independent discovery sources
+act as capture-recapture passes: a subdomain seen by both certificate
+transparency and RapidDNS is a recapture, and the overlap estimates the true
+surface size (Chapman estimator with a 95% interval).
+
+```bash
+strata coverage --db target.db --target target.com
+```
+
+Small overlaps are reported honestly as "insufficient overlap" rather than
+extrapolated. Coverage estimates appear in run reports as insight notes.
+
+---
+
+## Contested Claims
+
+Sources disagree sometimes: a subdomain appears in a CT log but the brute
+force proves its parent dead. Fusion flags such entities as `contested`, and
+`strata arbitrate` lists them for manual re-verification instead of letting
+the loudest source win:
+
+```bash
+strata arbitrate --db target.db
+```
+
+---
+
+## Surface Snapshots and Drift
+
+Freeze the current belief state and compare it against future runs to see
+exactly how the surface moved — new subdomains, dead claims, status changes,
+and confidence shifts:
+
+```bash
+strata snapshot --db target.db --target target.com --out snapshot.json
+strata diff --db target.db --against snapshot.json --out drift.md
+```
+
+Pass `--auto-snapshot` to `strata run` to freeze a snapshot automatically at
+the end of every run.
+
+---
+
+
+## Attack-Value Ranking
+
+Not all findings deserve equal attention. Every asset gets a priority score
+from its kind, name keywords (admin / login / api / auth / dev), fingerprint
+signals (technology, disclosed versions, missing security headers, WAF), and
+verification status. Dead claims are never ranked:
+
+```bash
+strata targets --db target.db --target target.com --top 25 --out priorities.md
+strata portfolio --db target.db        # every stored target at a glance
+```
+
+---
+
+
+## Vulnerability Layer: Disclosed Versions to CVEs
+
+Strata claims a CVE only under strict conditions: the target must *disclose*
+a software version (Server / X-Powered-By / generator tags), and the
+disclosed version must fall inside a published advisory window
+(`since <= version < fixed`, compared numerically, branch-aware). No
+version, no claim. Matches become `kind=vuln` findings with the window,
+severity, and advisory summary in evidence:
+
+```bash
+strata run target.com                 # version extraction happens in the fingerprint stage
+strata list --db target.db --target target.com
+```
+
+The curated map (`src/strata/data/cve_map.json`) covers high-confidence
+cases (Apache traversal pair, Nginx resolver, Struts Jakarta RCE, PHP CGI
+argument injection, Drupalgeddon2, Django SQLi, Spring4Shell, Tomcat partial
+PUT, Next.js middleware bypass, Laravel Ignition, WordPress WP_Query SQLi).
+Maintenance rule: add entries only for CVEs with a well-defined version
+window.
+
+---
+
+
+## Nuclei Bridge
+
+Strata and nuclei form a round trip: Strata maps the surface and hands it to
+nuclei; nuclei detections come back as vuln findings with their provenance:
+
+```bash
+# Hand the live surface to nuclei
+strata export-nuclei --db target.db --target target.com --out targets.txt
+nuclei -l targets.txt -json -o results.jsonl
+
+# Bring detections back (standalone or at the start of a run)
+strata import-nuclei results.jsonl --db target.db
+strata run target.com --import-nuclei results.jsonl --db target.db
+```
+
+---
+
+
+## Subdomain Takeover Verification
+
+```bash
+strata takeover --db target.db --target target.com
+```
+
+Resolves CNAME chains, flags dangling aliases (third-party service records
+with no A/AAAA answer), and fingerprints the unclaimed-resource error pages
+of 14 curated services (S3 `NoSuchBucket`, GitHub Pages, Heroku, Azure App
+Service, CloudFront, Shopify, Zendesk, Fastly, Ghost(Pro), Pantheon, Surge,
+Bitbucket, Webflow, Heroku SSL DNS-only). A marker match produces a
+verified `vuln` finding; a dangling alias without a marker is surfaced as a
+manual-review candidate. Strata never claims exploitability without the
+service fingerprint.
+
+---
+
+
+## Authenticated Surface Discovery
+
+Session credentials extend the reachable surface to login-protected areas.
+Headers are applied to every in-scope request and are never written to
+reports, manifests, or logs:
+
+```bash
+strata run target.com \
+  --cookie "session=..." \
+  --header "X-Tenant: acme" \
+  --auth-bearer "$TOKEN" \
+  --scope-file program-scope.txt
+```
+
+`--scope-file` merges a bug-bounty program scope (one domain per line, `#`
+comments allowed) with the target scope. `--notify-url` posts a run
+summary to Slack, Discord, or any generic webhook when the run completes;
+notification failures never fail the run.
+
 ---
 
 ## Benchmarking
@@ -301,9 +467,18 @@ strata content         JS/robots/sitemap content discovery
 strata fuse            Fuse duplicate entities across runs
 strata tension         Evidence tension analysis
 strata calibrate       Confidence calibration from outcomes
+strata coverage        Surface coverage estimation (capture-recapture)
+strata arbitrate       List claims where discovery sources conflict
+strata takeover        Verify dangling CNAMEs against service fingerprints
+strata targets         Rank the surface by attack value
+strata portfolio       Survey every stored target at a glance
+strata snapshot        Freeze the current surface belief state
+strata diff            Diff the live database against a snapshot
 strata report          Render findings as MD/HTML/SARIF/JSONL
 strata stats           Database statistics
 strata list            List stored findings
+strata export-nuclei         Export nuclei target URL list
+strata import-nuclei         Import nuclei JSON results
 strata import-aperture       Import aperture JSONL
 strata import-vulnharvest    Import VulnHarvest JSON
 strata import-jsast          Import jsast JSON

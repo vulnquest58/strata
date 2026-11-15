@@ -21,6 +21,11 @@ from strata.core.content.secrets import (
     secret_asset_id,
     secret_confidence,
 )
+from strata.core.content.soft404 import (
+    Soft404Profile,
+    classify_response,
+    fetch_baseline,
+)
 from strata.core.content.urls import (
     host_of,
     interest_score,
@@ -28,6 +33,7 @@ from strata.core.content.urls import (
     normalise_url,
     param_names,
 )
+from strata.core.inference import rank_by_information_gain
 from strata.core.policy.scope import ScopePolicy
 from strata.core.schema.models import (
     Confidence,
@@ -71,7 +77,10 @@ class ContentRunStats:
     probed: int = 0
     verified: int = 0
     dead: int = 0
+    soft404: int = 0
+    baseline_fetches: int = 0
     errors: int = 0
+    expected_information_bits: float = 0.0
 
 
 @dataclass
@@ -420,12 +429,25 @@ class ContentDiscoveryEngine:
     async def _probe(
         self, endpoints: dict[str, UnifiedFinding], result: ContentRunResult
     ) -> None:
-        ranked = sorted(
-            endpoints.values(), key=lambda finding: (-finding.confidence.value, finding.asset_value)
-        )[: self._max_probe]
+        ranked = rank_by_information_gain(endpoints.values())[: self._max_probe]
         semaphore = asyncio.Semaphore(self._max_concurrency)
 
-        async def probe(finding: UnifiedFinding) -> None:
+        # One soft-404 baseline per host: whatever the host returns for a
+        # path that cannot exist is its "not found" page.
+        baselines: dict[str, Soft404Profile | None] = {}
+        for finding, _ in ranked:
+            host = host_of(finding.asset_value)
+            if host in baselines or len(baselines) >= 5:
+                continue
+            baselines[host] = await fetch_baseline(
+                finding.asset_value,
+                self._transport,
+                timeout=self._timeout,
+            )
+            result.stats.baseline_fetches += 1
+
+        async def probe(finding: UnifiedFinding, gain: float) -> None:
+            host = host_of(finding.asset_value)
             async with semaphore:
                 try:
                     response = await self._transport.get(
@@ -436,31 +458,41 @@ class ContentDiscoveryEngine:
                 except Exception:
                     result.stats.errors += 1
                     return
+            verdict = classify_response(response, baselines.get(host))
             result.stats.probed += 1
+            result.stats.expected_information_bits = round(
+                result.stats.expected_information_bits + gain, 3
+            )
             status = response.status
             finding.evidence.append(
                 Evidence(
                     engine="content_probe",
                     technique="http_probe",
-                    observation=f"HTTP {status} from {finding.asset_value}",
+                    observation=f"HTTP {status} from {finding.asset_value} ({verdict})",
                     strength=(
                         EvidenceStrength.STRONG
-                        if 200 <= status < 400
+                        if 200 <= status < 400 and verdict == "live"
                         else EvidenceStrength.CORROBORATED
                     ),
                     meta={
                         "status": status,
                         "server": response.headers.get("server", ""),
+                        "soft404_verdict": verdict,
                     },
                 )
             )
             finding.metadata["probe_status"] = status
+            finding.metadata["probe_verdict"] = verdict
             finding.metadata["prior_confidence"] = finding.confidence.value
-            if 200 <= status < 400:
+            if 200 <= status < 400 and verdict == "live":
                 finding.status = FindingStatus.VERIFIED
                 result.stats.verified += 1
-            elif status in (404, 410):
+            elif status in (404, 410) or verdict == "soft404":
                 finding.status = FindingStatus.DEAD
                 result.stats.dead += 1
+                if verdict == "soft404":
+                    result.stats.soft404 += 1
+                    finding.metadata["soft404"] = True
+            # verdict == "uncertain" keeps the candidate alive
 
-        await asyncio.gather(*(probe(finding) for finding in ranked))
+        await asyncio.gather(*(probe(finding, gain) for finding, gain in ranked))

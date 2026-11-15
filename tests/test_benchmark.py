@@ -87,6 +87,12 @@ async def test_orchestrator_golden_surface(tmp_path: Path) -> None:
             {"content-type": "application/javascript"},
             b'const url = "/api/users?user_id=1";',
         ),
+        "https://www.example.com/": FetchResponse(
+            "https://www.example.com/", 200, {}, b"ok"
+        ),
+        "https://www.example.com": FetchResponse(
+            "https://www.example.com", 200, {}, b"ok"
+        ),
         USERS: FetchResponse(USERS, 200, {}, b"ok"),
         f"{USERS}&user_id=PARAMORACLE_PROBE_1": FetchResponse(
             f"{USERS}&user_id=PARAMORACLE_PROBE_1", 200, {}, b"ok PARAMORACLE_PROBE_1"

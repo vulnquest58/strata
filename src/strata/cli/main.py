@@ -117,6 +117,40 @@ def cmd_import_triage_loom(args: argparse.Namespace) -> int:
     return _import_content_report(args, load_triage_loom_jsonl, "triage-loom")
 
 
+def cmd_import_nuclei(args: argparse.Namespace) -> int:
+    from strata.adapters.nuclei import load_nuclei_jsonl
+    print_banner(_VERSION)
+    return _import_content_report(args, load_nuclei_jsonl, "nuclei")
+
+
+def cmd_export_nuclei(args: argparse.Namespace) -> int:
+    from strata.adapters.nuclei import export_nuclei_targets
+
+    print_banner(_VERSION)
+    db = StrataDB(args.db)
+    target = _scoped_target(db, args.target)
+    findings = list(db.iter_findings(target=target))
+    db.close()
+    targets = export_nuclei_targets(
+        findings, include_candidates=not args.verified_only
+    )
+    out = Path(args.out) if args.out else Path(
+        f"nuclei-targets-{(target or 'all').replace('.', '-')}.txt"
+    )
+    out.write_text("\n".join(targets) + ("\n" if targets else ""), encoding="utf-8")
+    section("Nuclei Target Export", Icon.ARROW)
+    print_kv_table([
+        KV("target", target or "all", C.WHITE),
+        KV("urls", str(len(targets)), C.BGREEN),
+        KV("output", str(out), C.CYAN),
+    ])
+    if not targets:
+        warn("no live surface stored yet; run `strata run` first")
+    else:
+        info(f"run: nuclei -l {out} -json -o results.jsonl")
+    return 0
+
+
 # ─────────────────────────── content ────────────────────────────────────────
 
 def cmd_content(args: argparse.Namespace) -> int:
@@ -197,6 +231,106 @@ def cmd_content(args: argparse.Namespace) -> int:
     except (PermissionError, ValueError) as exc:
         err(str(exc))
         return 2
+
+
+# ─────────────────────────── targets / portfolio ────────────────────────────
+
+def cmd_targets(args: argparse.Namespace) -> int:
+    from strata.core.attack_value import rank_by_attack_value
+
+    print_banner(_VERSION)
+    db = StrataDB(args.db)
+    target = _scoped_target(db, args.target)
+    findings = list(db.iter_findings(target=target))
+    db.close()
+
+    ranked = rank_by_attack_value(findings)
+    section("Attack-Value Ranking", Icon.FIRE)
+    print_kv_table([
+        KV("target", target or "all", C.WHITE),
+        KV("ranked", str(len(ranked)), C.BGREEN),
+    ])
+    if not ranked:
+        print()
+        info("nothing rankable yet; run `strata run` first")
+        return 0
+    print()
+    for item in ranked[: args.top]:
+        color = (
+            C.RED if item.value >= 70
+            else C.YELLOW if item.value >= 40
+            else C.GRAY
+        )
+        reasons = "; ".join(item.reasons[:2])
+        print(
+            f"  {color}{item.value:5.1f}{C.RST}  "
+            f"{C.BOLD}{item.asset_value[:60]:<60}{C.RST}  "
+            f"{C.GRAY}{reasons}{C.RST}"
+        )
+    if len(ranked) > args.top:
+        info(f"... and {len(ranked) - args.top} more")
+    if args.out:
+        lines = [
+            "# Strata attack-value ranking",
+            "",
+            f"- target: {target or 'all'}",
+            "",
+            "| Value | Asset | Reasons |",
+            "|---:|---|---|",
+        ]
+        for item in ranked:
+            lines.append(
+                f"| {item.value:.1f} | {item.asset_value} | "
+                f"{'; '.join(item.reasons)} |"
+            )
+        Path(args.out).write_text(
+            "\n".join(lines) + "\n", encoding="utf-8", newline="\n"
+        )
+        ok(f"Attack-value report -> {C.CYAN}{args.out}{C.RST}")
+    return 0
+
+
+def cmd_portfolio(args: argparse.Namespace) -> int:
+    from strata.core.attack_value import rank_by_attack_value
+
+    print_banner(_VERSION)
+    db = StrataDB(args.db)
+    targets = db.targets()
+    sections = []
+    for target_name, count in targets.items():
+        findings = list(db.iter_findings(target=target_name))
+        ranked = rank_by_attack_value(findings)
+        verified = sum(1 for f in findings if f.status == FindingStatus.VERIFIED)
+        vulns = [
+            f for f in findings
+            if f.kind == FindingClass.VULN and f.status != FindingStatus.DEAD
+        ]
+        hot = ranked[0] if ranked else None
+        sections.append((target_name, count, verified, len(vulns), hot))
+    db.close()
+
+    section("Portfolio Overview", Icon.INFO)
+    print_kv_table([
+        KV("targets", str(len(sections)), C.BWHITE),
+        KV("total findings", str(sum(s[1] for s in sections)), C.CYAN),
+    ])
+    print()
+    if not sections:
+        info("no targets stored yet; run `strata run <target>` first")
+        return 0
+    warn_vulns = sum(1 for s in sections if s[3])
+    for target_name, count, verified, vuln_count, hot in sections:
+        color = C.RED if vuln_count else C.GREEN
+        hot_label = f"top: {hot.asset_value} ({hot.value:.0f})" if hot else "no rank"
+        print(
+            f"  {C.BOLD}{target_name:<28}{C.RST} "
+            f"findings={count:<5} verified={verified:<5} "
+            f"{color}vuln={vuln_count}{C.RST}  {C.GRAY}{hot_label}{C.RST}"
+        )
+    if warn_vulns:
+        print()
+        warn(f"{warn_vulns} target(s) carry vuln findings — prioritize review")
+    return 0
 
 
 # ─────────────────────────── report ─────────────────────────────────────────
@@ -298,6 +432,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     db = StrataDB(args.db)
     target = _scoped_target(db, args.target)
     data = db.calibration(target=target)
+    reliability = db.source_reliability(target=target)
     db.close()
 
     prefix = f"strata-calibration-{target.replace('.', '-')}" if target else "strata-calibration"
@@ -324,6 +459,22 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         lines.append(
             f"| {band['band']} | {band['count']} | {mean} | {observed} |"
         )
+    if reliability:
+        lines.extend(
+            [
+                "",
+                "## Source reliability",
+                "",
+                "| Source | Outcomes | Verified | Dead | Observed rate | Flagged |",
+                "|---|---:|---:|---:|---:|---|",
+            ]
+        )
+        for source, entry in reliability.items():
+            lines.append(
+                f"| {source} | {entry['outcomes']} | {entry['verified']} | "
+                f"{entry['dead']} | {entry['observed_rate']}% | "
+                f"{'yes' if entry['flagged'] else 'no'} |"
+            )
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
     section("Confidence Calibration", Icon.INFO)
@@ -349,7 +500,230 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
                 f"n={band['count']:<4} predicted={mean:<6} observed={observed}"
             )
         print()
+    if reliability:
+        section("Source reliability", Icon.BULLET)
+        ranked = sorted(
+            reliability.items(),
+            key=lambda kv: (-kv[1]["outcomes"], kv[0]),
+        )
+        for source, entry in ranked[:10]:
+            color = C.RED if entry["flagged"] else C.GREEN
+            flag = f"  {C.RED}FLAGGED{C.RST}" if entry["flagged"] else ""
+            print(
+                f"  {C.BOLD}{source:<24}{C.RST} "
+                f"n={entry['outcomes']:<4} "
+                f"{color}verifies {entry['observed_rate']}%{C.RST}{flag}"
+            )
+        flagged = [kv for kv in reliability.items() if kv[1]["flagged"]]
+        for source, entry in flagged:
+            warn(f"{source}: {entry['flag_reason']}")
+        print()
     ok(f"Calibration report -> {C.CYAN}{report_path}{C.RST}")
+    return 0
+
+
+# ─────────────────────────── coverage ───────────────────────────────────────
+
+def cmd_coverage(args: argparse.Namespace) -> int:
+    from strata.core.coverage import estimate_coverage
+
+    print_banner(_VERSION)
+    db = StrataDB(args.db)
+    target = _scoped_target(db, args.target)
+    findings = list(db.iter_findings(target=target))
+    db.close()
+
+    estimates = estimate_coverage(findings)
+    section("Surface Coverage (capture-recapture)", Icon.INFO)
+    print_kv_table([
+        KV("target", target or "all", C.WHITE),
+        KV("kinds", str(len(estimates)), C.WHITE),
+    ])
+    print()
+    if not estimates:
+        info("no findings stored yet; run `strata run` first")
+        return 0
+    rows = []
+    for kind, est in estimates.items():
+        if est.source_pair:
+            detail = (
+                f"~{est.estimate}  CI[{est.ci_low}, {est.ci_high}]  "
+                f"via {est.source_pair[0]}+{est.source_pair[1]} (overlap {est.overlap})"
+            )
+        else:
+            detail = f"{est.observed}  (no overlapping sources; completeness unknown)"
+        rows.append(KV(kind, detail, C.CYAN if est.source_pair else C.GRAY))
+    print_kv_table(rows)
+    print()
+    if args.out:
+        lines = [
+            "# Strata surface coverage",
+            "",
+            f"- target: {target or 'all'}",
+            "",
+            "| Kind | Observed | Estimate | CI | Sources | Overlap |",
+            "|---|---:|---:|---|---|---:|",
+        ]
+        for kind, est in estimates.items():
+            sources = (
+                f"{est.source_pair[0]} + {est.source_pair[1]}"
+                if est.source_pair
+                else "n/a"
+            )
+            lines.append(
+                f"| {kind} | {est.observed} | ~{est.estimate} | "
+                f"[{est.ci_low}, {est.ci_high}] | {sources} | {est.overlap} |"
+            )
+        Path(args.out).write_text(
+            "\n".join(lines) + "\n", encoding="utf-8", newline="\n"
+        )
+        ok(f"Coverage report -> {C.CYAN}{args.out}{C.RST}")
+    return 0
+
+
+# ─────────────────────────── snapshot / diff ────────────────────────────────
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    import json
+
+    from strata.core.diff import snapshot_from_findings
+    from strata.core.paths import timestamped_report_path
+
+    print_banner(_VERSION)
+    db = StrataDB(args.db)
+    target = _scoped_target(db, args.target)
+    findings = list(db.iter_findings(target=target))
+    db.close()
+
+    label = target or "all"
+    snapshot = snapshot_from_findings(
+        findings, target=label, strata_version=_VERSION
+    )
+    out = Path(args.out) if args.out else timestamped_report_path(
+        prefix=f"strata-snapshot-{label.replace('.', '-')}", extension="json"
+    )
+    out.write_text(
+        json.dumps(snapshot.to_dict(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    ok(
+        f"Snapshot frozen ({len(snapshot.entries)} claims, target {label}) "
+        f"-> {C.CYAN}{out}{C.RST}"
+    )
+    return 0
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    import json
+
+    from strata.core.diff import (
+        SurfaceSnapshot,
+        diff_markdown,
+        diff_snapshots,
+        snapshot_from_findings,
+    )
+
+    print_banner(_VERSION)
+    if not args.against:
+        err("--against <baseline-snapshot.json> is required")
+        return 2
+    try:
+        baseline = SurfaceSnapshot.from_dict(
+            json.loads(Path(args.against).read_text(encoding="utf-8"))
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        err(f"cannot load baseline snapshot: {exc}")
+        return 2
+
+    db = StrataDB(args.db)
+    target = _scoped_target(db, args.target)
+    findings = list(db.iter_findings(target=target))
+    db.close()
+
+    current = snapshot_from_findings(
+        findings, target=target or "all", strata_version=_VERSION
+    )
+    diff = diff_snapshots(baseline, current)
+
+    section("Surface Drift", Icon.INFO)
+    print_kv_table([
+        KV("baseline", baseline.exported_at or "unknown", C.GRAY),
+        KV("added",    str(len(diff.added)),    C.GREEN),
+        KV("removed",  str(len(diff.removed)),  C.RED),
+        KV("status_changes", str(len(diff.status_changes)), C.YELLOW),
+        KV("confidence_shifts", str(len(diff.confidence_changes)), C.CYAN),
+        KV("churn", str(diff.churn), C.WHITE),
+    ])
+    print()
+    if diff.added:
+        info(f"new: {', '.join(diff.added[:8])}" + (" ..." if len(diff.added) > 8 else ""))
+    if diff.removed:
+        warn(f"gone: {', '.join(diff.removed[:8])}" + (" ..." if len(diff.removed) > 8 else ""))
+
+    if args.out:
+        Path(args.out).write_text(
+            diff_markdown(diff, baseline, current), encoding="utf-8", newline="\n"
+        )
+        ok(f"Diff report -> {C.CYAN}{args.out}{C.RST}")
+    return 0
+
+
+# ─────────────────────────── arbitrate ──────────────────────────────────────
+
+def cmd_arbitrate(args: argparse.Namespace) -> int:
+    print_banner(_VERSION)
+    db = StrataDB(args.db)
+    target = _scoped_target(db, args.target)
+    contested = [
+        finding
+        for finding in db.iter_findings(target=target)
+        if finding.metadata.get("contested")
+    ]
+    db.close()
+    contested.sort(key=lambda finding: -finding.confidence.value)
+
+    section("Source Arbitration — Contested Claims", Icon.FIRE)
+    print_kv_table([
+        KV("target", target or "all", C.WHITE),
+        KV("contested", str(len(contested)), C.YELLOW if contested else C.GREEN),
+    ])
+    print()
+    if not contested:
+        ok("no contested claims: no source contradicts another")
+        return 0
+    warn("sources disagree on existence; re-verify before trusting either side")
+    print()
+    for finding in contested[:25]:
+        color = C.RED if finding.confidence.value >= 70 else C.YELLOW
+        sources = finding.metadata.get("source_count", 2)
+        print(
+            f"  {color}{finding.confidence.value:5.1f}{C.RST}  "
+            f"{C.BOLD}{finding.kind.value:<9}{C.RST}  "
+            f"src={sources}  {redact_url(finding.asset_value)}"
+        )
+    if len(contested) > 25:
+        info(f"... and {len(contested) - 25} more")
+    if args.out:
+        lines = [
+            "# Strata contested claims",
+            "",
+            f"- target: {target or 'all'}",
+            f"- contested: {len(contested)}",
+            "",
+            "| Confidence | Kind | Asset | Sources |",
+            "|---:|---|---|---:|",
+        ]
+        for finding in contested:
+            lines.append(
+                f"| {finding.confidence.value:.1f} | {finding.kind.value} | "
+                f"{redact_url(finding.asset_value)} | "
+                f"{finding.metadata.get('source_count', 2)} |"
+            )
+        Path(args.out).write_text(
+            "\n".join(lines) + "\n", encoding="utf-8", newline="\n"
+        )
+        ok(f"Arbitration report -> {C.CYAN}{args.out}{C.RST}")
     return 0
 
 
@@ -365,6 +739,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.target and args.target_option and args.target != args.target_option:
         err("target specified twice with different values")
         return 2
+
+    extra_headers: dict[str, str] = {}
+    if args.auth_bearer:
+        extra_headers["Authorization"] = f"Bearer {args.auth_bearer}"
+    if args.cookie:
+        extra_headers["Cookie"] = args.cookie
+    for header in args.header or []:
+        if ":" not in header:
+            err(f"--header expects 'Name: value', got {header!r}")
+            return 2
+        name, _, value = header.partition(":")
+        extra_headers[name.strip()] = value.strip()
+    if extra_headers:
+        info(f"authenticated mode: {len(extra_headers)} session header(s)")
 
     print_banner(_VERSION, target=target)
 
@@ -408,6 +796,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         import_jsast=args.import_jsast and Path(args.import_jsast),
         import_vulnharvest=args.import_vulnharvest and Path(args.import_vulnharvest),
         import_triage_loom=args.import_triage_loom and Path(args.import_triage_loom),
+        import_nuclei=args.import_nuclei and Path(args.import_nuclei),
+        extra_headers=extra_headers,
+        scope_file=Path(args.scope_file) if args.scope_file else None,
+        notify_url=args.notify_url,
+        auto_snapshot=args.auto_snapshot,
     )
 
     t0 = time.monotonic()
@@ -532,6 +925,22 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 # ─────────────────────────── dns ────────────────────────────────────────────
 
+def _dns_priorities(db_path: str, target: str) -> dict[str, float]:
+    """Historical per-word success rates for self-calibrated wordlists."""
+    try:
+        db = StrataDB(db_path)
+    except Exception:
+        return {}
+    try:
+        learned = db.technique_stats(target)
+        return {
+            word: entry["rate"] for word, entry in learned.items()
+            if entry["rate"] > 0
+        }
+    finally:
+        db.close()
+
+
 def cmd_dns(args: argparse.Namespace) -> int:
     from strata.engines.dns_brute import DnsDiscoveryEngine
 
@@ -557,6 +966,7 @@ def cmd_dns(args: argparse.Namespace) -> int:
             max_concurrency=args.concurrency,
             mutate=not args.no_mutations,
             known=known,
+            priorities=_dns_priorities(args.db, args.domain),
         )
 
         stage_start("DNS Bruteforce", f"wordlist={args.wordlist}  concurrency={args.concurrency}")
@@ -567,6 +977,9 @@ def cmd_dns(args: argparse.Namespace) -> int:
         db = StrataDB(args.db)
         for f in result.findings:
             db.upsert_finding(f, target=args.domain)
+        for dead_finding in result.dead_findings:
+            db.upsert_finding(dead_finding, target=args.domain)
+        db.record_technique_stats(args.domain, result.word_stats)
         stats = db.stats(target=args.domain)
         db.close()
 
@@ -576,6 +989,7 @@ def cmd_dns(args: argparse.Namespace) -> int:
             "resolved": s.resolved,
             "wildcard_filtered": s.wildcard_filtered,
             "mutations": s.mutation_candidates,
+            "dead_recorded": s.recorded_dead,
             "errors": s.errors,
         })
 
@@ -674,6 +1088,90 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+# ─────────────────────────── takeover ───────────────────────────────────────
+
+def cmd_takeover(args: argparse.Namespace) -> int:
+    from strata.core.content.fetch import UrllibTransport
+    from strata.core.dns.resolver import DnspythonTransport, Resolver
+    from strata.engines.takeover import TakeoverEngine
+
+    print_banner(_VERSION)
+
+    async def run() -> int:
+        db = StrataDB(args.db)
+        target = _scoped_target(db, args.target)
+        policy = ScopePolicy.from_spec(target) if target else None
+        findings = [
+            f for f in db.iter_findings(target=target)
+            if f.kind in (FindingClass.SUBDOMAIN, FindingClass.LIVE_HOST)
+            and f.status in (FindingStatus.VERIFIED, FindingStatus.CANDIDATE)
+        ]
+        engine = TakeoverEngine(
+            Resolver(DnspythonTransport(timeout=args.timeout)),
+            UrllibTransport(),
+            timeout=args.timeout,
+            max_hosts=args.max_hosts,
+        )
+        stage_start("Takeover Verification", f"{len(findings)} hosts")
+        t0 = time.monotonic()
+        result = await engine.run(findings, policy=policy)
+        for finding in result.findings:
+            db.upsert_finding(finding, target=target)
+        stats = db.stats(target=target)
+        db.close()
+        elapsed = time.monotonic() - t0
+
+        s = result.stats
+        stage_done("takeover", {
+            "checked": s.checked,
+            "dangling": s.dangling,
+            "confirmed": s.confirmed,
+            "candidates": s.candidates,
+            "errors": s.errors,
+        })
+        confirmed = [
+            f for f in result.findings if f.status is FindingStatus.VERIFIED
+        ]
+        if confirmed:
+            section("Takeover-Confirmed Claims", Icon.FIRE)
+            for f in sorted(confirmed, key=lambda x: -x.confidence.value)[:25]:
+                provider = f.metadata.get("provider") or "?"
+                color = C.RED if f.confidence.value >= 80 else C.YELLOW
+                print(
+                    f"  {color}{f.confidence.value:5.1f}{C.RST}  "
+                    f"{C.BOLD}{provider:<16}{C.RST}  "
+                    f"{redact_url(f.asset_value)}"
+                )
+            warn("verify exploitability manually before reporting")
+        else:
+            info("no takeover-confirmed claims")
+        candidates = [
+            f for f in result.findings if f.status is FindingStatus.CANDIDATE
+        ]
+        if candidates:
+            info(
+                f"{len(candidates)} dangling-alias candidates flagged for "
+                "manual review"
+            )
+        print_summary_box(
+            "takeover",
+            {
+                "checked": s.checked,
+                "dangling": s.dangling,
+                "confirmed": s.confirmed,
+                "total_in_db": stats["findings"],
+            },
+            elapsed,
+        )
+        return 0
+
+    try:
+        return asyncio.run(run())
+    except PermissionError as exc:
+        err(str(exc))
+        return 2
+
+
 # ─────────────────────────── argument parser ────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -765,6 +1263,27 @@ def build_parser() -> argparse.ArgumentParser:
     triage.add_argument("--target", help="attach imported findings to this target")
     triage.set_defaults(func=cmd_import_triage_loom)
 
+    # import-nuclei
+    nuclei_imp = sub.add_parser(
+        "import-nuclei", help="import a nuclei -json results file (.jsonl)"
+    )
+    nuclei_imp.add_argument("file", help="path to nuclei results (one JSON object per line)")
+    nuclei_imp.add_argument("--db", default="strata.db")
+    nuclei_imp.add_argument("--target", help="attach imported findings to this target")
+    nuclei_imp.set_defaults(func=cmd_import_nuclei)
+
+    # export-nuclei
+    nuclei_exp = sub.add_parser(
+        "export-nuclei", help="export live surface as a nuclei target URL list"
+    )
+    nuclei_exp.add_argument("--db", default="strata.db")
+    nuclei_exp.add_argument("--target", help="scope to one target")
+    nuclei_exp.add_argument("--out", help="explicit output path (.txt)")
+    nuclei_exp.add_argument(
+        "--verified-only", action="store_true", help="exclude candidate claims"
+    )
+    nuclei_exp.set_defaults(func=cmd_export_nuclei)
+
     # fuse
     fuse = sub.add_parser("fuse", help="fuse duplicate entities across runs")
     fuse.add_argument("--db", default="strata.db")
@@ -807,6 +1326,30 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--import-jsast")
     run.add_argument("--import-vulnharvest")
     run.add_argument("--import-triage-loom")
+    run.add_argument("--import-nuclei", help="import a nuclei -json results file first")
+    run.add_argument(
+        "--cookie", help="session Cookie header applied to every in-scope request"
+    )
+    run.add_argument(
+        "--auth-bearer", help="Authorization: Bearer token for in-scope requests"
+    )
+    run.add_argument(
+        "--header",
+        action="append",
+        help="extra session header 'Name: value' (repeatable)",
+    )
+    run.add_argument(
+        "--scope-file",
+        help="additional in-scope domains file (one per line, # comments)",
+    )
+    run.add_argument(
+        "--notify-url", help="webhook URL for the run-completion summary"
+    )
+    run.add_argument(
+        "--auto-snapshot",
+        action="store_true",
+        help="freeze a surface snapshot at the end of every run",
+    )
     run.add_argument("--no-resume", action="store_true")
     run.add_argument("--min-sources", type=int, default=2)
     run.add_argument(
@@ -842,6 +1385,80 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--target", help="scope calibration to one target")
     calibrate.add_argument("--out", help="explicit report path")
     calibrate.set_defaults(func=cmd_calibrate)
+
+    # coverage
+    coverage = sub.add_parser(
+        "coverage",
+        help="estimate surface completeness via capture-recapture",
+        description=(
+            "Independent discovery sources act as capture passes; source "
+            "overlap yields a Lincoln-Petersen estimate of the true surface "
+            "size, i.e. how much is still missing."
+        ),
+    )
+    coverage.add_argument("--db", default="strata.db")
+    coverage.add_argument("--target", help="scope to one target")
+    coverage.add_argument("--out", help="write a Markdown report")
+    coverage.set_defaults(func=cmd_coverage)
+
+    # snapshot
+    snapshot = sub.add_parser(
+        "snapshot", help="freeze the current surface belief state as JSON"
+    )
+    snapshot.add_argument("--db", default="strata.db")
+    snapshot.add_argument("--target", help="scope to one target")
+    snapshot.add_argument("--out", help="explicit snapshot path (.json)")
+    snapshot.set_defaults(func=cmd_snapshot)
+
+    # diff
+    diff = sub.add_parser(
+        "diff", help="diff the live database against a snapshot (surface drift)"
+    )
+    diff.add_argument("--db", default="strata.db")
+    diff.add_argument("--target", help="scope to one target")
+    diff.add_argument("--against", help="baseline snapshot .json from `strata snapshot`")
+    diff.add_argument("--out", help="write a Markdown drift report")
+    diff.set_defaults(func=cmd_diff)
+
+    # arbitrate
+    arbitrate = sub.add_parser(
+        "arbitrate",
+        help="list claims where discovery sources conflict on existence",
+    )
+    arbitrate.add_argument("--db", default="strata.db")
+    arbitrate.add_argument("--target", help="scope to one target")
+    arbitrate.add_argument("--out", help="write a Markdown arbitration report")
+    arbitrate.set_defaults(func=cmd_arbitrate)
+
+    # takeover
+    takeover = sub.add_parser(
+        "takeover",
+        help="verify dangling CNAMEs and fingerprint unclaimed service pages",
+    )
+    takeover.add_argument("--db", default="strata.db")
+    takeover.add_argument("--target", help="scope to one target")
+    takeover.add_argument("--timeout", type=float, default=10.0)
+    takeover.add_argument("--max-hosts", type=int, default=100)
+    takeover.set_defaults(func=cmd_takeover)
+
+    # targets
+    targets = sub.add_parser(
+        "targets",
+        help="rank the stored surface by attack value (prioritization view)",
+    )
+    targets.add_argument("--db", default="strata.db")
+    targets.add_argument("--target", help="scope to one target")
+    targets.add_argument("--top", type=int, default=20)
+    targets.add_argument("--out", help="write a Markdown ranking report")
+    targets.set_defaults(func=cmd_targets)
+
+    # portfolio
+    portfolio = sub.add_parser(
+        "portfolio",
+        help="survey every stored target: counts, verified, vuln findings",
+    )
+    portfolio.add_argument("--db", default="strata.db")
+    portfolio.set_defaults(func=cmd_portfolio)
 
     # report
     report = sub.add_parser("report", help="write findings as HTML / MD / SARIF / JSONL")

@@ -113,3 +113,47 @@ def test_tension_markdown_includes_summary_and_findings() -> None:
     assert "# Tension" in rendered
     assert "| Hot | 1 |" in rendered
     assert "| a.example.com |" in rendered
+
+
+def test_contested_metadata_adds_tension() -> None:
+    clean = assess_tension(
+        _finding(asset_value="a.example.com", confidence=60.0, engines=["dns_brute"])
+    )
+    contested = assess_tension(
+        _finding(
+            asset_value="a.example.com",
+            confidence=60.0,
+            engines=["dns_brute"],
+            metadata={"contested": True},
+        )
+    )
+    assert contested.score >= clean.score + 15
+    assert "sources conflict" in " ".join(contested.reasons).lower()
+
+
+def test_dead_parents_add_tension() -> None:
+    finding = _finding(
+        asset_value="vpn.example.com", confidence=60.0, engines=["dns_brute"]
+    )
+    assessment = assess_tension(finding, dead_parents={"vpn.example.com"})
+    assert assessment.score >= 50
+    assert any("dead" in reason.lower() for reason in assessment.reasons)
+
+
+def test_stale_claims_decay_in_tension() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime(2026, 11, 14, tzinfo=UTC)
+    stale = _finding(
+        asset_value="old.example.com", confidence=60.0, engines=["dns_brute"]
+    )
+    stale.discovered_at = now - timedelta(days=60)
+    fresh = _finding(
+        asset_value="new.example.com", confidence=60.0, engines=["dns_brute"]
+    )
+    stale_assessment = assess_tension(stale, now=now)
+    fresh_assessment = assess_tension(fresh, now=now)
+    assert stale_assessment.score > fresh_assessment.score
+    assert stale_assessment.effective_confidence < 60.0
+    assert fresh_assessment.effective_confidence == 60.0
+    assert stale_assessment.age_days == 60.0

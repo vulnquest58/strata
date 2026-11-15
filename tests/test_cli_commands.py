@@ -110,3 +110,59 @@ def test_calibrate_without_outcomes(tmp_path, capsys):
     )
     assert "- outcomes: 0" in report.read_text(encoding="utf-8")
     assert "no verification outcomes yet" in capsys.readouterr().out
+
+
+def test_coverage_snapshot_diff_arbitrate_commands(tmp_path, capsys):
+    db = tmp_path / "strata.db"
+    store = StrataDB(db)
+    store.upsert_finding(
+        seed("a.example.test", FindingStatus.CANDIDATE), target="example.test"
+    )
+    store.upsert_finding(
+        seed("b.example.test", FindingStatus.CANDIDATE), target="example.test"
+    )
+    store.upsert_finding(
+        seed("c.example.test", FindingStatus.DEAD), target="example.test"
+    )
+    store.close()
+
+    assert main(["coverage", "--db", str(db), "--target", "example.test"]) == 0
+    out = capsys.readouterr().out
+    assert "subdomain" in out
+    assert "no overlapping sources" in out
+
+    snapshot = tmp_path / "snapshot.json"
+    assert (
+        main(["snapshot", "--db", str(db), "--out", str(snapshot)]) == 0
+    )
+    assert snapshot.exists()
+    assert "example.test" in snapshot.read_text(encoding="utf-8")
+
+    drift = tmp_path / "drift.md"
+    assert (
+        main(
+            [
+                "diff",
+                "--db",
+                str(db),
+                "--against",
+                str(snapshot),
+                "--out",
+                str(drift),
+            ]
+        )
+        == 0
+    )
+    assert "Surface Drift" in capsys.readouterr().out
+    drift_text = drift.read_text(encoding="utf-8")
+    assert "# Strata surface diff" in drift_text
+    assert "## Confidence shifts" in drift_text
+
+    arbitrate = tmp_path / "arbitration.md"
+    assert (
+        main(["arbitrate", "--db", str(db), "--out", str(arbitrate)]) == 0
+    )
+    assert "no contested claims" in capsys.readouterr().out
+
+    assert main(["diff", "--db", str(db)]) != 0
+    assert "--against" in capsys.readouterr().err

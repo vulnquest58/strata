@@ -16,6 +16,7 @@ from datetime import UTC
 from math import prod
 
 from strata.core.content.urls import host_of, normalise_url
+from strata.core.reliability import collapse_by_family, source_family
 from strata.core.schema.models import (
     Confidence,
     ConfidenceMethod,
@@ -220,7 +221,11 @@ def _fused_components(members: tuple[UnifiedFinding, ...]) -> dict[str, float]:
     return _collect_components(members)
 
 
-def fuse_group(group: EntityGroup) -> UnifiedFinding:
+def fuse_group(
+    group: EntityGroup,
+    *,
+    reliability: dict[str, float] | None = None,
+) -> UnifiedFinding:
     members = group.findings
     evidence = _merge_evidence(members)
     digest_source = f"{group.kind.value}|{group.key}".encode()
@@ -231,6 +236,9 @@ def fuse_group(group: EntityGroup) -> UnifiedFinding:
         parent = host_of(asset_value) or None
 
     components = _collect_components(members)
+    weights = reliability or {}
+    statuses = {member.status for member in members}
+    contested = FindingStatus.DEAD in statuses and statuses != {FindingStatus.DEAD}
     if len(members) == 1 and not _is_fusion_finding(members[0]):
         source = members[0]
         confidence = Confidence(
@@ -246,11 +254,30 @@ def fuse_group(group: EntityGroup) -> UnifiedFinding:
             components=components,
         )
     else:
+        weighted = {
+            key: value * max(0.0, min(1.0, weights.get(key.split(":", 1)[0], 1.0)))
+            for key, value in components.items()
+        }
+        # Correlated sources must not multiply: collapse to the strongest
+        # signal per evidence family, then combine families with noisy-OR.
+        family_components, _raw = collapse_by_family(weighted)
         confidence = Confidence(
-            value=noisy_or_confidence(components.values()),
+            value=noisy_or_confidence(family_components.values()),
             method=ConfidenceMethod.NOISY_OR,
             components=components,
         )
+
+    metadata = {
+        **_merge_metadata(members),
+        "source": FUSION_SOURCE,
+        "entity_key": group.key,
+        "source_count": len({source_family(key) for key in components}),
+        "source_count_raw": len(components),
+        "source_runs": _source_runs(members),
+        "source_finding_ids": _source_finding_ids(members),
+    }
+    if contested:
+        metadata["contested"] = True
 
     return UnifiedFinding(
         finding_id=f"fusion:{digest}",
@@ -264,22 +291,20 @@ def fuse_group(group: EntityGroup) -> UnifiedFinding:
         scope_ok=all(member.scope_ok for member in members),
         discovered_at=min(members, key=_finding_order).discovered_at,
         legacy=members[0].legacy,
-        metadata={
-            **_merge_metadata(members),
-            "source": FUSION_SOURCE,
-            "entity_key": group.key,
-            "source_count": len(components),
-            "source_runs": _source_runs(members),
-            "source_finding_ids": _source_finding_ids(members),
-        },
+        metadata=metadata,
     )
 
 
 def fuse_findings(
     findings: Iterable[UnifiedFinding],
+    *,
+    reliability: dict[str, float] | None = None,
 ) -> list[UnifiedFinding]:
     """Fuse every resolved entity, including singleton groups."""
-    return [fuse_group(group) for group in resolve_entities(findings)]
+    return [
+        fuse_group(group, reliability=reliability)
+        for group in resolve_entities(findings)
+    ]
 
 
 def superseded_finding_ids(fused: UnifiedFinding) -> list[str]:

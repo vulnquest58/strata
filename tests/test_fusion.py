@@ -1,5 +1,6 @@
 from strata.core.schema.models import (
     Confidence,
+    ConfidenceMethod,
     Evidence,
     FindingClass,
     FindingStatus,
@@ -7,8 +8,10 @@ from strata.core.schema.models import (
 )
 from strata.core.store.db import StrataDB
 from strata.engines.fusion import (
+    EntityGroup,
     entity_key,
     fuse_findings,
+    fuse_group,
     noisy_or_confidence,
     resolve_entities,
     superseded_finding_ids,
@@ -251,3 +254,110 @@ def test_fusion_replaces_raw_rows_and_is_idempotent(tmp_path) -> None:
     assert len(rows) == 1
     assert rows[0].confidence.value == 76.0
     assert rows[0].metadata["source_count"] == 2
+
+
+def _group(
+    *,
+    statuses: list[FindingStatus],
+    confidences: list[float],
+    engines: list[str] | None = None,
+) -> EntityGroup:
+    engines = engines or ["crtsh"] * len(statuses)
+    members = []
+    for index, (status, value) in enumerate(
+        zip(statuses, confidences, strict=True)
+    ):
+        members.append(
+            UnifiedFinding(
+                finding_id=f"src:{index}",
+                run_id=f"r{index}",
+                kind=FindingClass.SUBDOMAIN,
+                status=status,
+                asset_value="api.example.com",
+                confidence=Confidence(
+                    value=value,
+                    method=ConfidenceMethod.NOISY_OR,
+                    components={f"{engines[index]}:r{index}": value},
+                ),
+                evidence=[
+                    Evidence(
+                        engine=engines[index], technique="test", observation="t"
+                    )
+                ],
+            )
+        )
+    return EntityGroup(
+        kind=FindingClass.SUBDOMAIN,
+        key="subdomain|api.example.com",
+        findings=members,
+    )
+
+
+def test_fusion_flags_contested_claim_when_dead_mixes_with_alive() -> None:
+    fused = fuse_group(
+        _group(
+            statuses=[FindingStatus.CANDIDATE, FindingStatus.DEAD],
+            confidences=[60.0, 40.0],
+        )
+    )
+    assert fused.metadata.get("contested") is True
+    assert fused.status is not FindingStatus.DEAD
+
+
+def test_unanimous_claim_is_not_contested() -> None:
+    fused = fuse_group(
+        _group(statuses=[FindingStatus.CANDIDATE] * 2, confidences=[50.0, 50.0])
+    )
+    assert "contested" not in fused.metadata
+
+
+def test_reliability_weights_lower_low_quality_sources() -> None:
+    group = _group(
+        statuses=[FindingStatus.CANDIDATE] * 2,
+        confidences=[60.0, 60.0],
+        engines=["poisoned", "solid"],
+    )
+    plain = fuse_group(group)
+    weighted = fuse_group(group, reliability={"poisoned": 0.0, "solid": 1.0})
+    assert weighted.confidence.value < plain.confidence.value
+    assert plain.confidence.value == noisy_or_confidence([60.0, 60.0])
+
+
+def test_correlated_sources_do_not_double_count() -> None:
+    from strata.core.reliability import source_family
+
+    assert source_family("dns_brute") == "dns"
+    assert source_family("passive_dns") == "dns"
+    assert source_family("custom_engine") == "custom_engine"
+    group = _group(
+        statuses=[FindingStatus.CANDIDATE] * 2,
+        confidences=[60.0, 60.0],
+        engines=["dns_brute", "passive_dns"],
+    )
+    fused = fuse_group(group)
+    # Two DNS-family voters act as one: no noisy-OR boost.
+    assert fused.confidence.value == 60.0
+    assert fused.metadata["source_count"] == 1
+    assert fused.metadata["source_count_raw"] == 2
+
+
+def test_independent_families_still_multiply() -> None:
+    group = _group(
+        statuses=[FindingStatus.CANDIDATE] * 2,
+        confidences=[60.0, 60.0],
+        engines=["dns_brute", "content_crawl"],
+    )
+    fused = fuse_group(group)
+    assert fused.confidence.value == noisy_or_confidence([60.0, 60.0])
+    assert fused.metadata["source_count"] == 2
+
+
+def test_family_keeps_strongest_signal_within_correlated_sources() -> None:
+    group = _group(
+        statuses=[FindingStatus.CANDIDATE] * 3,
+        confidences=[40.0, 60.0, 60.0],
+        engines=["dns_brute", "dns_verify", "content_crawl"],
+    )
+    fused = fuse_group(group)
+    # dns family contributes max(40, 60); content contributes 60
+    assert fused.confidence.value == noisy_or_confidence([60.0, 60.0])

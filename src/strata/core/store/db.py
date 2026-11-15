@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from strata.core.reliability import assess_source_reliability, claim_sources
 from strata.core.schema.models import (
     Confidence,
     Evidence,
@@ -76,7 +77,17 @@ CREATE TABLE IF NOT EXISTS claim_outcomes (
     observed INTEGER NOT NULL CHECK (observed IN (0, 1)),
     previous_status TEXT NOT NULL,
     new_status TEXT NOT NULL,
-    observed_at TEXT NOT NULL
+    observed_at TEXT NOT NULL,
+    sources TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS technique_stats (
+    scope TEXT NOT NULL,
+    technique TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    successes INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (scope, technique)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_row ON
@@ -101,6 +112,15 @@ def _normalise_target(target: str | None) -> str | None:
     return value or None
 
 
+def _decode_json(raw: Any, *, default: Any) -> Any:
+    if not isinstance(raw, str) or not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
 class StrataDB:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -120,6 +140,13 @@ class StrataDB:
         if "components" not in columns:
             self.conn.execute(
                 "ALTER TABLE findings ADD COLUMN components TEXT NOT NULL DEFAULT '{}'"
+            )
+        outcome_columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(claim_outcomes)")
+        }
+        if "sources" not in outcome_columns:
+            self.conn.execute(
+                "ALTER TABLE claim_outcomes ADD COLUMN sources TEXT NOT NULL DEFAULT '[]'"
             )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_findings_target ON findings(target)"
@@ -181,10 +208,13 @@ class StrataDB:
         ):
             return
         observed = 1 if new_status == FindingStatus.VERIFIED.value else 0
+        sources = json.dumps(
+            claim_sources(evidence.engine for evidence in finding.evidence)
+        )
         self.conn.execute(
             "INSERT INTO claim_outcomes(finding_id, run_id, target, kind,"
-            " predicted, observed, previous_status, new_status, observed_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " predicted, observed, previous_status, new_status, observed_at, sources)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 finding_id,
                 finding.run_id,
@@ -195,6 +225,7 @@ class StrataDB:
                 previous_status,
                 new_status,
                 datetime.now(UTC).isoformat(),
+                sources,
             ),
         )
 
@@ -294,6 +325,11 @@ class StrataDB:
             f"SELECT status, COUNT(*) FROM findings{where} GROUP BY status", params
         ):
             by_status[row[0]] = row[1]
+        by_kind: dict[str, int] = {}
+        for row in self.conn.execute(
+            f"SELECT kind, COUNT(*) FROM findings{where} GROUP BY kind", params
+        ):
+            by_kind[row[0]] = row[1]
         if target:
             evidence_count = self.conn.execute(
                 "SELECT COUNT(*) FROM evidence e"
@@ -309,6 +345,7 @@ class StrataDB:
             "findings": sum(by_status.values()),
             "evidence": evidence_count,
             **{f"status_{k}": v for k, v in by_status.items()},
+            **{f"kind_{k}": v for k, v in by_kind.items()},
         }
 
     def targets(self) -> dict[str, int]:
@@ -404,7 +441,7 @@ class StrataDB:
         params: tuple[Any, ...] = (target,) if target else ()
         rows = self.conn.execute(
             "SELECT finding_id, run_id, target, kind, predicted, observed,"
-            " previous_status, new_status, observed_at FROM claim_outcomes"
+            " previous_status, new_status, observed_at, sources FROM claim_outcomes"
             f"{where} ORDER BY outcome_id",
             params,
         )
@@ -419,6 +456,7 @@ class StrataDB:
                 "previous_status": row[6],
                 "new_status": row[7],
                 "observed_at": row[8],
+                "sources": _decode_json(row[9], default=[]),
             }
             for row in rows
         ]
@@ -516,6 +554,55 @@ class StrataDB:
             "log_loss": round(log_loss, 4),
             "accuracy": round(accuracy, 4),
             "bands": band_rows,
+        }
+
+    def source_reliability(self, *, target: str | None = None) -> dict[str, Any]:
+        """Measured verify rate per discovery source, plus poisoning flags."""
+        outcomes = self.iter_outcomes(target=target)
+        return assess_source_reliability(outcomes)
+
+    def record_technique_stats(
+        self, scope: str, entries: dict[str, tuple[int, int]]
+    ) -> int:
+        """Accumulate attempts/successes per technique (e.g. DNS words).
+
+        ``entries`` maps a technique key to an ``(attempts, successes)`` pair
+        observed in one run; counts accumulate across runs.
+        """
+        if not entries:
+            return 0
+        now = datetime.now(UTC).isoformat()
+        updated = 0
+        for technique, (attempts, successes) in entries.items():
+            if attempts <= 0 and successes <= 0:
+                continue
+            self.conn.execute(
+                "INSERT INTO technique_stats(scope, technique, attempts,"
+                " successes, updated_at) VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(scope, technique) DO UPDATE SET"
+                " attempts = attempts + excluded.attempts,"
+                " successes = successes + excluded.successes,"
+                " updated_at = excluded.updated_at",
+                (scope, technique, max(0, attempts), max(0, successes), now),
+            )
+            updated += 1
+        self.conn.commit()
+        return updated
+
+    def technique_stats(self, scope: str) -> dict[str, dict[str, float]]:
+        """Historical attempts/successes/success-rate per technique key."""
+        rows = self.conn.execute(
+            "SELECT technique, attempts, successes FROM technique_stats"
+            " WHERE scope = ? ORDER BY technique",
+            (scope,),
+        )
+        return {
+            row[0]: {
+                "attempts": row[1],
+                "successes": row[2],
+                "rate": (row[2] / row[1]) if row[1] else 0.0,
+            }
+            for row in rows
         }
 
     def get_run_memory(self, target: str) -> dict[str, Any]:

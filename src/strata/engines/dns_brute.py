@@ -60,6 +60,7 @@ class DnsRunStats:
     mutation_candidates: int = 0
     errors: int = 0
     findings: int = 0
+    recorded_dead: int = 0
 
 
 @dataclass
@@ -68,6 +69,64 @@ class DnsRunResult:
     findings: list[UnifiedFinding] = field(default_factory=list)
     stats: DnsRunStats = field(default_factory=DnsRunStats)
     wildcard: WildcardBase | None = None
+    dead_findings: list[UnifiedFinding] = field(default_factory=list)
+    word_stats: dict[str, dict[str, int]] = field(default_factory=dict)
+
+
+def order_words(
+    words: tuple[str, ...],
+    priorities: dict[str, float] | None = None,
+) -> tuple[str, ...]:
+    """Order the wordlist by historical success rate, then original order.
+
+    Words with recorded outcomes come first, best rate first; unmeasured
+    words keep their original relative order afterwards. This is how the
+    wordlist self-calibrates across runs without ever leaving the local
+    database.
+    """
+    rates = priorities or {}
+    measured = [
+        (index, word)
+        for index, word in enumerate(words)
+        if word in rates
+    ]
+    unmeasured = [
+        (index, word)
+        for index, word in enumerate(words)
+        if word not in rates
+    ]
+    measured.sort(key=lambda pair: (-rates[pair[1]], pair[0]))
+    ordered = measured + unmeasured
+    return tuple(word for _, word in ordered)
+
+
+def word_of(candidate: str) -> str:
+    """First label of a candidate hostname (the tested word)."""
+    return candidate.split(".", 1)[0]
+
+
+def _to_dead_finding(domain: str, candidate: str) -> UnifiedFinding:
+    """A passive/brute claim the resolver contradicted (NXDOMAIN / no answer)."""
+    return UnifiedFinding(
+        run_id=f"dns:{domain}",
+        kind=FindingClass.SUBDOMAIN,
+        status=FindingStatus.DEAD,
+        asset_value=candidate,
+        parent=domain,
+        confidence=Confidence(
+            value=15.0,
+            method="imported",
+            components={"dns_resolve": 15.0},
+        ),
+        evidence=[
+            Evidence(
+                engine="dns_resolve",
+                technique="a_probe",
+                observation=f"{candidate}: name does not resolve (no address record)",
+                strength=EvidenceStrength.STRONG,
+            )
+        ],
+    )
 
 
 class DnsDiscoveryEngine:
@@ -80,6 +139,7 @@ class DnsDiscoveryEngine:
         mutate: bool = True,
         max_depth: int = 2,
         known: set[str] | None = None,
+        priorities: dict[str, float] | None = None,
     ):
         self._resolver = resolver
         self._policy = policy
@@ -88,14 +148,20 @@ class DnsDiscoveryEngine:
         self._mutate = mutate
         self._max_depth = max_depth
         self._known = known or set()
+        self._priorities = priorities or {}
 
     async def run(self, domain: str) -> DnsRunResult:
         if not self._policy.allows_domain(domain):
             raise PermissionError(f"domain {domain} is out of scope")
 
         result = DnsRunResult(domain=domain)
-        result.wildcard = await detect_wildcard(self._resolver, domain)
-        words = load_wordlist(self._wordlist)
+        try:
+            result.wildcard = await detect_wildcard(self._resolver, domain)
+        except (TimeoutError, OSError):
+            # An unreachable resolver must not abort the whole run; proceed
+            # without wildcard filtering and let per-probe errors accrue.
+            result.wildcard = None
+        words = order_words(load_wordlist(self._wordlist), self._priorities)
         candidates = [f"{w}.{domain}" for w in words]
 
         confirmed: list[UnifiedFinding] = []
@@ -206,23 +272,36 @@ class DnsDiscoveryEngine:
             ],
         )
 
+    def _record_dead(self, domain: str, candidate: str, result: DnsRunResult) -> None:
+        if candidate in self._known:
+            return
+        result.dead_findings.append(_to_dead_finding(domain, candidate))
+        result.stats.recorded_dead += 1
+
     async def _resolve_batch(
         self, candidates: list[str], result: DnsRunResult, is_echo: bool = False
     ) -> list[tuple]:
         async def probe(candidate: str):
             if candidate in self._known:
                 return None
+            word = word_of(candidate)
+            word_entry = result.word_stats.setdefault(
+                word, {"attempts": 0, "successes": 0}
+            )
             result.stats.candidates_tested += 1
+            word_entry["attempts"] += 1
             try:
                 async with self._semaphore:
                     host = await self._resolver.resolve(candidate)
             except (TimeoutError, NxDomain):
                 return None
             if host is None:
+                self._record_dead(result.domain, candidate, result)
                 return None
             if is_wildcard_hit(result.wildcard, host.ips):
                 result.stats.wildcard_filtered += 1
                 return None
+            word_entry["successes"] += 1
             return (host, candidate)
 
         probes = [probe(candidate) for candidate in candidates]

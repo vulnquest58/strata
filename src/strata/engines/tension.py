@@ -11,8 +11,11 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
+from strata.core.content.urls import host_of
+from strata.core.decay import age_in_days, effective_confidence
 from strata.core.redact import redact_url
 from strata.core.schema.models import FindingStatus, UnifiedFinding
 
@@ -36,6 +39,8 @@ class TensionAssessment:
     score: int
     label: str
     reasons: list[str] = field(default_factory=list)
+    effective_confidence: float = 0.0
+    age_days: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -47,6 +52,8 @@ class TensionAssessment:
             "score": self.score,
             "label": self.label,
             "reasons": list(self.reasons),
+            "effective_confidence": self.effective_confidence,
+            "age_days": self.age_days,
         }
 
 
@@ -86,7 +93,13 @@ def _has_live_probe(finding: UnifiedFinding) -> bool:
     return any(evidence.engine in _LIVE_ENGINES for evidence in finding.evidence)
 
 
-def assess_tension(finding: UnifiedFinding) -> TensionAssessment:
+def assess_tension(
+    finding: UnifiedFinding,
+    *,
+    dead_parents: Iterable[str] | None = None,
+    now: datetime | None = None,
+) -> TensionAssessment:
+    dead = set(dead_parents) if dead_parents else set()
     score = 0
     reasons: list[str] = []
 
@@ -110,6 +123,37 @@ def assess_tension(finding: UnifiedFinding) -> TensionAssessment:
         score += 15
         reasons.append("dead claim with residual confidence")
 
+    age = age_in_days(finding.discovered_at, now)
+    effective = effective_confidence(
+        finding.confidence.value, finding.status.value, finding.discovered_at, now=now
+    )
+    if finding.status is not FindingStatus.DEAD and finding.confidence.value > 0:
+        ratio = effective / finding.confidence.value
+        if ratio <= 0.8:
+            score += 10
+            reasons.append(
+                f"belief decayed to {effective:.0f} of {finding.confidence.value:.0f} "
+                f"(half-life; age {age:.0f}d)"
+            )
+
+    if finding.metadata.get("contested"):
+        score += 20
+        reasons.append("sources conflict on existence")
+
+    host = host_of(finding.asset_value) or (
+        finding.asset_value if "." in finding.asset_value else ""
+    )
+    dead_parent = (
+        (finding.parent or "") in dead
+        or (host and host in dead)
+        or (host and f"https://{host}" in dead)
+    )
+    if dead_parent and finding.status is not FindingStatus.DEAD:
+        score += 15
+        reasons.append(
+            f"parent asset {(finding.parent or host)!r} is dead; claim inherited doubt"
+        )
+
     score = min(100, score)
 
     if finding.status is FindingStatus.DEAD and finding.confidence.value >= 50:
@@ -130,17 +174,30 @@ def assess_tension(finding: UnifiedFinding) -> TensionAssessment:
         score=score,
         label=label,
         reasons=reasons,
+        effective_confidence=effective,
+        age_days=round(age, 2),
     )
 
 
-def assess_tensions(findings: Iterable[UnifiedFinding]) -> list[TensionAssessment]:
-    return [assess_tension(finding) for finding in findings]
+def assess_tensions(
+    findings: Iterable[UnifiedFinding],
+    *,
+    dead_parents: Iterable[str] | None = None,
+    now: datetime | None = None,
+) -> list[TensionAssessment]:
+    return [
+        assess_tension(finding, dead_parents=dead_parents, now=now)
+        for finding in findings
+    ]
 
 
 def summarise_tension(
     findings: Iterable[UnifiedFinding],
+    *,
+    dead_parents: Iterable[str] | None = None,
+    now: datetime | None = None,
 ) -> tuple[TensionSummary, list[TensionAssessment]]:
-    items = assess_tensions(findings)
+    items = assess_tensions(findings, dead_parents=dead_parents, now=now)
     by_label = Counter(assessment.label for assessment in items)
     by_kind = Counter(assessment.kind for assessment in items)
     mean_score = (
@@ -189,8 +246,9 @@ def tension_markdown(
             "",
             "## Findings",
             "",
-            "| Tension | Label | Confidence | Status | Kind | Asset | Reasons |",
-            "|---:|---|---:|---|---|---|---|",
+            "| Tension | Label | Confidence | Effective | Age (d) | Status |"
+            " Kind | Asset | Reasons |",
+            "|---:|---|---:|---:|---:|---|---|---|---|",
         ]
     )
     for assessment in items:
@@ -201,6 +259,7 @@ def tension_markdown(
         reasons = "; ".join(assessment.reasons).replace("|", "\\|")
         lines.append(
             f"| {assessment.score} | {assessment.label} | {assessment.confidence:.1f} | "
+            f"{assessment.effective_confidence:.1f} | {assessment.age_days:.0f} | "
             f"{assessment.status} | {assessment.kind} | {asset} | {reasons} |"
         )
     return "\n".join(lines) + "\n"

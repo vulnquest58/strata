@@ -106,6 +106,9 @@ _TECH_SIGNATURES: list[tuple[str, str]] = [
     (r"(?i)x-svelte|/svelte/", "SvelteKit"),
     (r"(?i)graphql", "GraphQL"),
     (r"(?i)x-hasura-\w", "Hasura"),
+    (r"(?i)server:\s*(?:apache-)?coyote|tomcat", "Apache Tomcat"),
+    (r"(?i)x-powered-by:\s*django", "Django"),
+    (r"(?i)server:\s*jetty", "Jetty"),
 ]
 
 _CDN_SIGNATURES: list[tuple[str, str]] = [
@@ -118,6 +121,26 @@ _CDN_SIGNATURES: list[tuple[str, str]] = [
     (r"(?i)x-bunnycdn|bunnycdn", "BunnyCDN"),
     (r"(?i)x-cdn:\s*imperva", "Imperva CDN"),
 ]
+
+# Disclosed-version extraction: canonical tech name -> header-value pattern.
+_VERSION_HEADERS = ("server", "x-powered-by", "x-generator")
+_TECH_VERSION_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("Nginx", r"nginx/(\d+(?:\.\d+){0,3})"),
+    ("Apache HTTP Server", r"apache/(\d+(?:\.\d+){0,3})"),
+    ("Apache Tomcat", r"tomcat/(\d+(?:\.\d+){0,3})"),
+    ("PHP", r"php/(\d+(?:\.\d+){0,3})"),
+    ("ASP.NET", r"asp\.net(?:\s*version)?[:/\s]*(\d+(?:\.\d+){0,3})"),
+    ("Express.js", r"express/(\d+(?:\.\d+){0,3})"),
+    ("Django", r"django/(\d+(?:\.\d+){0,3})"),
+    ("Laravel", r"laravel/(\d+(?:\.\d+){0,3})"),
+    ("Jetty", r"jetty/(\d+(?:\.\d+){0,3})"),
+    ("Gunicorn/Python", r"gunicorn/(\d+(?:\.\d+){0,3})"),
+    ("Uvicorn/Python", r"uvicorn/(\d+(?:\.\d+){0,3})"),
+)
+_BODY_VERSION_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("WordPress", r"wordpress\s+(\d+(?:\.\d+){0,3})"),
+    ("Drupal", r"drupal\s+(\d+(?:\.\d+){0,3})"),
+)
 
 _SECURITY_HEADERS = [
     "strict-transport-security",
@@ -142,6 +165,7 @@ class FingerprintResult:
     cdn: str | None
     sec_headers: dict[str, str | None]  # header → value or None if missing
     raw_headers: dict[str, str]
+    versions: dict[str, str] | None = None  # tech → disclosed version
     finding: UnifiedFinding | None = None
 
 
@@ -187,6 +211,24 @@ def fingerprint_response(response: FetchResponse, *, run_id: str = "http_fp") ->
     for hdr in _SECURITY_HEADERS:
         sec_headers[hdr] = headers_lower.get(hdr)
 
+    # Disclosed software versions (self-reported by the target)
+    versions: dict[str, str] = {}
+    for tech, pattern in _TECH_VERSION_PATTERNS:
+        for hdr in _VERSION_HEADERS:
+            value = headers_lower.get(hdr)
+            if not value:
+                continue
+            match = re.search(pattern, value, re.IGNORECASE)
+            if match:
+                versions[tech] = match.group(1)
+                break
+    for tech, pattern in _BODY_VERSION_PATTERNS:
+        if tech in versions:
+            continue
+        match = re.search(pattern, combined, re.IGNORECASE)
+        if match:
+            versions[tech] = match.group(1)
+
     missing_critical = [
         h for h in ("strict-transport-security", "content-security-policy", "x-frame-options")
         if sec_headers.get(h) is None
@@ -200,6 +242,10 @@ def fingerprint_response(response: FetchResponse, *, run_id: str = "http_fp") ->
         observations.append(f"WAF: {waf}")
     if cdn:
         observations.append(f"CDN: {cdn}")
+    if versions:
+        observations.append(
+            "versions: " + ", ".join(f"{t} {v}" for t, v in sorted(versions.items()))
+        )
     if missing_critical:
         observations.append(f"missing security headers: {', '.join(missing_critical)}")
 
@@ -243,6 +289,7 @@ def fingerprint_response(response: FetchResponse, *, run_id: str = "http_fp") ->
             "server": server,
             "sec_headers": sec_headers,
             "missing_critical_headers": missing_critical,
+            "versions": versions,
         },
     )
 
@@ -255,6 +302,7 @@ def fingerprint_response(response: FetchResponse, *, run_id: str = "http_fp") ->
         cdn=cdn,
         sec_headers=sec_headers,
         raw_headers=dict(response.headers),
+        versions=versions or None,
         finding=finding,
     )
 

@@ -44,7 +44,7 @@ where = ["src"]
 version = { attr = "strata.__version__" }
 
 [tool.setuptools.package-data]
-strata = ["data/wordlists/*.txt", "core/dns/data/*.json"]
+strata = ["data/wordlists/*.txt", "data/*.json", "core/dns/data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

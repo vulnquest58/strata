@@ -19,7 +19,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from strata.core.schema.models import FindingClass, UnifiedFinding
+from strata.core.schema.models import FindingClass, FindingStatus, UnifiedFinding
 
 
 def _normalise_asset(value: str) -> str:
@@ -54,6 +54,7 @@ class BenchmarkScore:
     precision: float
     recall: float
     f1: float
+    refuted: int = 0
     by_kind: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
@@ -64,6 +65,7 @@ class BenchmarkScore:
             "precision": round(self.precision, 4),
             "recall": round(self.recall, 4),
             "f1": round(self.f1, 4),
+            "refuted": self.refuted,
             "by_kind": self.by_kind,
         }
 
@@ -71,8 +73,22 @@ class BenchmarkScore:
 def score_findings(
     findings: Iterable[UnifiedFinding], expected: Iterable[str]
 ) -> BenchmarkScore:
+    """Score the *live* surface against the expected set.
+
+    Dead findings are refutations, not discoveries: a benchmark asks "of the
+    assets Strata claims exist, how many really do?". Refuted claims are
+    counted separately as ``refuted`` so evaluator runs stay comparable when
+    DNS dead-recording is on.
+    """
     expected_set = {item.strip() for item in expected if item.strip()}
-    actual = {finding_key(finding) for finding in findings}
+    actual = {
+        finding_key(finding)
+        for finding in findings
+        if finding.status is not FindingStatus.DEAD
+    }
+    refuted = sum(
+        1 for finding in findings if finding.status is FindingStatus.DEAD
+    )
 
     true_positives = actual & expected_set
     false_positives = actual - expected_set
@@ -106,5 +122,6 @@ def score_findings(
         precision=precision,
         recall=recall,
         f1=f1,
+        refuted=refuted,
         by_kind=by_kind,
     )

@@ -17,25 +17,31 @@ from urllib.parse import urlparse
 
 from strata.adapters.aperture import load_aperture_jsonl
 from strata.adapters.jsast import load_jsast_report
+from strata.adapters.nuclei import load_nuclei_jsonl
 from strata.adapters.passive_dns import passive_dns_to_findings, query_passive_dns
 from strata.adapters.triage_loom import load_triage_loom_jsonl
 from strata.adapters.vulnharvest import load_vulnharvest_report
 from strata.core.budget import RequestBudget
 from strata.core.config import get_config
 from strata.core.content.fetch import HttpTransport, ThrottledTransport, UrllibTransport
+from strata.core.content.urls import host_of
 from strata.core.dns.resolver import DnspythonTransport, Resolver
 from strata.core.errors import classify_exception
 from strata.core.manifest import RunManifest, manifest_path_for
 from strata.core.paths import timestamped_report_path
 from strata.core.policy.scope import ScopePolicy
+from strata.core.reliability import reliability_weights
 from strata.core.reporting import ReportFormat, summarise, write_report
-from strata.core.schema.models import FindingClass, is_probable_domain
+from strata.core.schedule import PROBEABLE_KINDS
+from strata.core.schema.models import FindingClass, FindingStatus, is_probable_domain
 from strata.core.store.db import StrataDB
+from strata.core.vulns import cve_findings
 from strata.engines.dns_brute import DnsDiscoveryEngine
 from strata.engines.fusion import fuse_findings, superseded_finding_ids
 from strata.engines.http_fp import fingerprint_url
 from strata.engines.js_content import ContentDiscoveryEngine
 from strata.engines.param_oracle import ParamOracle
+from strata.engines.probe_engine import ProbeEngine
 from strata.engines.tension import summarise_tension
 
 
@@ -185,6 +191,13 @@ class RunOptions:
     import_jsast: Path | None = None
     import_vulnharvest: Path | None = None
     import_triage_loom: Path | None = None
+    import_nuclei: Path | None = None
+    # Authenticated surface discovery: session headers applied to every
+    # in-scope HTTP request. Values are never written to reports/manifests.
+    extra_headers: dict[str, str] = field(default_factory=dict)
+    scope_file: Path | None = None
+    notify_url: str | None = None
+    auto_snapshot: bool = False
 
 
 class RunLog:
@@ -293,6 +306,12 @@ def _db_stats_line(stats: dict[str, int]) -> str:
     return " ".join(f"{key}={value}" for key, value in sorted(stats.items()))
 
 
+def _package_version() -> str:
+    from strata import __version__
+
+    return __version__
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -307,6 +326,9 @@ class Orchestrator:
         self._target = _normalize_target(options.target)
         self._scope = options.scope or self._target
         self._policy = ScopePolicy.from_spec(self._scope)
+        if options.scope_file is not None:
+            self._policy = self._policy.merged(ScopePolicy.from_file(options.scope_file))
+            self._scope = ",".join(self._policy.allowed)
         self._seed = _seed_url(options.target, self._target)
         if resolver is not None:
             self._resolver = resolver
@@ -323,9 +345,16 @@ class Orchestrator:
             if (options.max_requests or options.max_bytes or options.max_seconds)
             else None
         )
-        self._transport = transport or UrllibTransport(budget=self._budget)
+        auth_headers = dict(options.extra_headers or {})
+        self._transport = transport or UrllibTransport(
+            budget=self._budget, extra_headers=auth_headers
+        )
         self._fingerprint_transport = fingerprint_transport
+        self._extra_headers = auth_headers
         self._log = RunLog()
+        self._started_at = datetime.now(UTC)
+        self._stages_this_run: list[StageResult] = []
+        self._version = _package_version()
         self._report_path: Path | None = None
         self._manifest = RunManifest(
             target=self._target,
@@ -379,6 +408,11 @@ class Orchestrator:
         self._log.header(self._target)
         self._log.field("scope", self._scope)
         self._log.field("plan", " -> ".join(name for name, _ in plan))
+        if self._extra_headers:
+            self._log.insight(
+                f"authenticated mode: {len(self._extra_headers)} session "
+                "header(s) applied to in-scope requests (values never logged)"
+            )
         self._log.field("memory", f"{memory.runs} prior runs")
         if self._budget is not None:
             self._log.field(
@@ -420,6 +454,7 @@ class Orchestrator:
                 )
             if stage_result is not None:
                 result.stages.append(stage_result)
+                self._stages_this_run.append(stage_result)
                 memory.record(
                     stage_result.stage,
                     new_findings=stage_result.new_findings,
@@ -462,8 +497,60 @@ class Orchestrator:
             self._manifest.write(manifest_path)
             result.manifest_path = manifest_path
             result.manifest = self._manifest.to_dict()
+            if self._options.auto_snapshot:
+                self._write_auto_snapshot(db)
+        vuln_findings = (
+            final_stats.get("kind_vuln", 0) if isinstance(final_stats, dict) else 0
+        )
+        if self._options.notify_url:
+            self._notify_run(final_stats, vuln_findings)
         db.close()
         return result
+
+    def _write_auto_snapshot(self, db: StrataDB) -> None:
+        import json
+
+        from strata.core.diff import snapshot_from_findings
+        from strata.core.paths import timestamped_report_path
+
+        try:
+            findings = list(db.iter_findings(target=self._target))
+            snapshot = snapshot_from_findings(
+                findings, target=self._target, strata_version=self._version
+            )
+            snapshot_path = timestamped_report_path(
+                prefix=f"strata-snapshot-{self._target.replace('.', '-')}",
+                extension="json",
+            )
+            snapshot_path.write_text(
+                json.dumps(snapshot.to_dict(), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            self._log.note(f"auto-snapshot -> {snapshot_path}")
+        except OSError as exc:
+            self._log.note(f"auto-snapshot failed: {exc}")
+
+    def _notify_run(self, stats: dict[str, int], vuln_findings: int) -> None:
+        from strata.core.notify import RunSummary, notify
+
+        elapsed = (datetime.now(UTC) - self._started_at).total_seconds()
+        summary = RunSummary(
+            target=self._target,
+            findings=stats.get("findings", 0),
+            verified=stats.get("status_verified", 0),
+            candidate=stats.get("status_candidate", 0),
+            dead=stats.get("status_dead", 0),
+            new_findings=sum(s.new_findings for s in self._stages_this_run),
+            vulns=vuln_findings,
+            elapsed_seconds=elapsed,
+            report_path=str(self._report_path) if self._report_path else None,
+        )
+        delivered = notify(self._options.notify_url, summary)
+        if delivered:
+            self._log.note("run summary delivered to notification webhook")
+        else:
+            self._log.note("notification webhook unreachable (run unaffected)")
 
     def _build_plan(
         self, suggestions: dict[str, Any]
@@ -476,6 +563,7 @@ class Orchestrator:
                 options.import_jsast,
                 options.import_vulnharvest,
                 options.import_triage_loom,
+                options.import_nuclei,
             )
         ):
             absorb_reason = (
@@ -501,6 +589,10 @@ class Orchestrator:
             if suggestions.get("max_candidates"):
                 reason = "prior parameter probing was sparse; widen the budget"
             plan.append(("param", reason))
+        if self._options.probe and self._options.max_probe > 0:
+            plan.append(
+                ("probe", "verify the most uncertain claims (EIG-ranked, soft-404 aware)")
+            )
         if not self._options.no_fuse:
             plan.append(("fuse", "reconcile duplicate entities across engines"))
         plan.append(("tension", "score evidence tension for prioritization"))
@@ -523,6 +615,8 @@ class Orchestrator:
             return await self._stage_content(db, before, memory)
         if stage == "param":
             return await self._stage_param(db, before, memory)
+        if stage == "probe":
+            return await self._stage_probe(db, before)
         if stage == "fuse":
             return self._stage_fuse(db, before)
         if stage == "tension":
@@ -571,6 +665,7 @@ class Orchestrator:
             ("triage-loom", options.import_triage_loom, load_triage_loom_jsonl),
             ("jsast", options.import_jsast, load_jsast_report),
             ("vulnharvest", options.import_vulnharvest, load_vulnharvest_report),
+            ("nuclei", options.import_nuclei, load_nuclei_jsonl),
         ]
         count = 0
         for _name, path, loader in sources:
@@ -650,9 +745,10 @@ class Orchestrator:
         unique = unique[:20]
 
         transport = self._fingerprint_transport or ThrottledTransport(
-            per_host_delay=0.5, budget=self._budget
+            per_host_delay=0.5, budget=self._budget, extra_headers=self._extra_headers
         )
         fp_findings = []
+        vuln_count = 0
         errors = 0
         for url in unique:
             fp = await fingerprint_url(
@@ -664,6 +760,10 @@ class Orchestrator:
             if fp and fp.finding:
                 db.upsert_finding(fp.finding, target=self._target)
                 fp_findings.append(fp)
+                vulns = cve_findings(fp.finding, run_id=f"vuln:{self._target}")
+                for vuln in vulns:
+                    db.upsert_finding(vuln, target=self._target)
+                    vuln_count += 1
             elif not fp:
                 errors += 1
 
@@ -673,6 +773,7 @@ class Orchestrator:
         stats = {
             "hosts_probed": len(unique),
             "fingerprinted": len(fp_findings),
+            "vulns": vuln_count,
             "errors": errors,
         }
         self._log.stat(_db_stats_line(stats))
@@ -681,6 +782,11 @@ class Orchestrator:
             notes.append(f"WAF detected: {', '.join(set(waf_found))}")
         if tech_found:
             notes.append(f"tech stack: {', '.join(tech_found[:8])}")
+        if vuln_count:
+            notes.append(
+                f"{vuln_count} disclosed-version CVE matches recorded "
+                "(VULN findings; verify before acting)"
+            )
         if not notes:
             notes.append("no distinctive fingerprints")
         for note in notes:
@@ -708,6 +814,15 @@ class Orchestrator:
                 for finding in db.iter_findings(target=self._target)
                 if finding.kind is FindingClass.SUBDOMAIN
             }
+        learned = db.technique_stats("dns")
+        priorities = {
+            word: entry["rate"] for word, entry in learned.items() if entry["rate"] > 0
+        }
+        if priorities:
+            self._log.insight(
+                f"self-calibrated wordlist: prioritising {len(priorities)} "
+                "historically productive words"
+            )
         engine = DnsDiscoveryEngine(
             resolver=self._resolver,
             policy=self._policy,
@@ -715,10 +830,21 @@ class Orchestrator:
             max_concurrency=self._options.max_concurrency,
             mutate=self._options.mutate,
             known=known,
+            priorities=priorities,
         )
         result = await engine.run(self._target)
         for finding in result.findings:
             db.upsert_finding(finding, target=self._target)
+        for finding in result.dead_findings:
+            db.upsert_finding(finding, target=self._target)
+        if result.word_stats:
+            db.record_technique_stats(
+                "dns",
+                {
+                    word: (entry["attempts"], entry["successes"])
+                    for word, entry in result.word_stats.items()
+                },
+            )
         after = db.stats(target=self._target)
         s = result.stats
         stats = {
@@ -726,6 +852,7 @@ class Orchestrator:
             "resolved": s.resolved,
             "wildcards": s.wildcard_filtered,
             "mutations": s.mutation_candidates,
+            "dead_recorded": s.recorded_dead,
             "errors": s.errors,
         }
         self._log.stat(_db_stats_line(stats))
@@ -736,6 +863,11 @@ class Orchestrator:
             notes.append("sparse name map; consider expanding the wordlist next run")
         else:
             notes.append(f"{s.resolved} names resolved")
+        if s.recorded_dead:
+            notes.append(
+                f"{s.recorded_dead} unresolvable claims recorded; fusion will "
+                "mark contradictions as contested"
+            )
         if result.wildcard:
             notes.append("wildcard base detected and filtered")
         for note in notes:
@@ -787,11 +919,19 @@ class Orchestrator:
             "verified": s.verified,
             "dead": s.dead,
             "errors": s.errors,
+            "info_bits_per_probe": (
+                round(s.expected_information_bits / s.probed, 3) if s.probed else 0.0
+            ),
         }
         self._log.stat(_db_stats_line(stats))
         notes: list[str] = []
         if s.endpoints_stored:
             notes.append(f"{s.endpoints_stored} endpoints discovered")
+        if s.probed:
+            notes.append(
+                f"probe budget spent at {s.expected_information_bits / s.probed:.2f} "
+                "bits of uncertainty resolved per request"
+            )
         if s.secrets_found:
             notes.append(f"{s.secrets_found} secret candidates")
         if not s.endpoints_stored and not s.secrets_found:
@@ -867,25 +1007,98 @@ class Orchestrator:
             notes=notes,
         )
 
+    async def _stage_probe(
+        self, db: StrataDB, before: dict[str, int]
+    ) -> StageResult:
+        reason = "verify the most uncertain claims (EIG-ranked, soft-404 aware)"
+        self._log.stage("probe", reason)
+        candidates = [
+            finding
+            for finding in db.iter_findings(target=self._target)
+            if finding.status in (FindingStatus.CANDIDATE, FindingStatus.STALE)
+            and finding.kind in PROBEABLE_KINDS
+        ]
+        engine = ProbeEngine(
+            self._transport,
+            max_probe=self._options.max_probe,
+            concurrency=min(self._options.max_concurrency, 8),
+            timeout=self._options.timeout,
+            run_id=f"probe:{self._target}",
+        )
+        result = await engine.run(candidates, policy=self._policy)
+        for finding in result.findings:
+            db.upsert_finding(finding, target=self._target)
+        s = result.stats
+        stats = {
+            "eligible": s.eligible,
+            "selected": s.selected,
+            "probed": s.probed,
+            "verified": s.verified,
+            "dead": s.dead,
+            "soft404": s.soft404,
+            "bits_per_probe": round(
+                s.expected_information_bits / s.probed, 3
+            ) if s.probed else 0.0,
+            "out_of_scope": s.out_of_scope,
+            "errors": s.errors,
+        }
+        self._log.stat(_db_stats_line(stats))
+        notes: list[str] = []
+        if s.selected:
+            notes.append(
+                f"probed {s.selected} of {s.eligible} candidates at "
+                f"{stats['bits_per_probe']} bits of uncertainty per request"
+            )
+        if s.soft404:
+            notes.append(
+                f"{s.soft404} soft-404 pages killed (HTTP 200 with not-found content)"
+            )
+        if s.selected and s.verified == 0 and s.dead == 0:
+            notes.append("no claim resolved by probing")
+        for note in notes:
+            self._log.note(note)
+        after = db.stats(target=self._target)
+        return StageResult(
+            stage="probe",
+            new_findings=max(0, after.get("findings", 0) - before.get("findings", 0)),
+            total_findings=after.get("findings", 0),
+            stats=stats,
+            notes=notes,
+        )
+
     def _stage_fuse(self, db: StrataDB, before: dict[str, int]) -> StageResult:
         self._log.stage("fuse", "reconcile duplicate entities across engines")
         findings = list(db.iter_findings(target=self._target))
+        reliability = reliability_weights(db.source_reliability(target=self._target))
+        if reliability:
+            top = sorted(reliability.items(), key=lambda kv: -kv[1])[:3]
+            self._log.insight(
+                "reliability-weighted fusion active for: "
+                + ", ".join(f"{name}={weight}" for name, weight in top)
+            )
         fused = [
             finding
-            for finding in fuse_findings(findings)
+            for finding in fuse_findings(findings, reliability=reliability)
             if finding.metadata.get("source_count", 1) >= self._options.min_sources
         ]
         for finding in fused:
             db.upsert_finding(finding, target=self._target)
             db.delete_findings(superseded_finding_ids(finding))
         after = db.stats(target=self._target)
-        stats = {"sources": len(findings), "fused": len(fused)}
+        contested = sum(
+            1 for finding in fused if finding.metadata.get("contested")
+        )
+        stats = {"sources": len(findings), "fused": len(fused), "contested": contested}
         self._log.stat(_db_stats_line(stats))
         notes: list[str] = []
         if not fused:
             notes.append("no duplicate entities to reconcile")
         else:
             notes.append(f"{len(fused)} entities now carry corroborated confidence")
+        if contested:
+            notes.append(
+                f"{contested} contested claims: sources disagree on existence"
+            )
         for note in notes:
             self._log.note(note)
         return StageResult(
@@ -899,7 +1112,15 @@ class Orchestrator:
     def _stage_tension(self, db: StrataDB, before: dict[str, int]) -> StageResult:
         self._log.stage("tension", "score evidence tension for prioritization")
         findings = list(db.iter_findings(target=self._target))
-        summary, assessments = summarise_tension(findings)
+        dead_parents: set[str] = set()
+        for finding in findings:
+            if finding.status is not FindingStatus.DEAD:
+                continue
+            dead_parents.add(finding.asset_value)
+            host = host_of(finding.asset_value)
+            if host:
+                dead_parents.add(host)
+        summary, assessments = summarise_tension(findings, dead_parents=dead_parents)
         by_id = {assessment.finding_id: assessment for assessment in assessments}
         stamped = 0
         for finding in findings:
@@ -910,6 +1131,8 @@ class Orchestrator:
                 "score": assessment.score,
                 "label": assessment.label,
                 "reasons": assessment.reasons,
+                "effective_confidence": assessment.effective_confidence,
+                "age_days": assessment.age_days,
             }
             if finding.metadata.get("tension") == tension_meta:
                 continue

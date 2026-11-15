@@ -1,6 +1,8 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from strata.core.schema.models import (
     Confidence,
     Evidence,
@@ -114,6 +116,75 @@ def test_direct_probe_records_prior_confidence_as_outcome(tmp_path: Path) -> Non
     assert outcomes[0]["predicted"] == 55.0
     assert outcomes[0]["observed"] == 1
     assert outcomes[0]["previous_status"] == "candidate"
+    assert outcomes[0]["sources"] == []  # content_probe is a verifier, not a claim
+    db.close()
+
+
+def test_source_reliability_aggregates_from_ledger(tmp_path: Path) -> None:
+    db = StrataDB(tmp_path / "strata.db")
+    for index in range(3):
+        db.upsert_finding(
+            _finding(
+                f"ghost{index}.example.com",
+                run_id="dns:example",
+                confidence=40.0,
+                engines=["dns_brute"],
+            ),
+            target="example",
+        )
+        db.upsert_finding(
+            _finding(
+                f"ghost{index}.example.com",
+                run_id="dns:example",
+                status=FindingStatus.DEAD,
+                confidence=20.0,
+                engines=["dns_brute", "dns_verify"],
+            ),
+            target="example",
+        )
+    for index in range(2):
+        db.upsert_finding(
+            _finding(
+                f"live{index}.example.com",
+                run_id="crtsh:example",
+                confidence=70.0,
+                engines=["crtsh"],
+            ),
+            target="example",
+        )
+        db.upsert_finding(
+            _finding(
+                f"live{index}.example.com",
+                run_id="crtsh:example",
+                status=FindingStatus.VERIFIED,
+                confidence=85.0,
+                engines=["crtsh", "content_probe"],
+            ),
+            target="example",
+        )
+
+    reliability = db.source_reliability(target="example")
+    assert reliability["dns_brute"]["outcomes"] == 3
+    assert reliability["dns_brute"]["dead"] == 3
+    assert reliability["dns_brute"]["observed_rate"] == 0.0
+    assert reliability["crtsh"]["outcomes"] == 2
+    assert reliability["crtsh"]["observed_rate"] == 100.0
+    db.close()
+
+
+def test_technique_stats_accumulate_across_writes(tmp_path: Path) -> None:
+    db = StrataDB(tmp_path / "strata.db")
+    db.record_technique_stats("example", {"api": (10, 2), "mail": (5, 0)})
+    db.record_technique_stats("example", {"api": (4, 2)})
+
+    stats = db.technique_stats("example")
+    assert stats["api"]["attempts"] == 14
+    assert stats["api"]["successes"] == 4
+    assert stats["api"]["rate"] == pytest.approx(4 / 14)
+    assert stats["mail"]["attempts"] == 5
+    assert stats["mail"]["successes"] == 0
+    assert stats["mail"]["rate"] == 0.0
+    assert db.technique_stats("other") == {}
     db.close()
 
 

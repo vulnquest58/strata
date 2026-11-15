@@ -1,0 +1,182 @@
+{
+  "schema": 1,
+  "note": "Curated, high-confidence technology version to CVE mappings. A match is claimed ONLY when the target itself discloses a version (Server / X-Powered-By headers). Vulnerability window: disclosed version >= 'since' AND < 'fixed' (numeric comparison). 'since' defaults to 0 when omitted. Branch-aware windows avoid flagging versions outside an advisory's affected range. Maintenance rule: add entries only for CVEs with a well-defined version window; never claim a CVE without a disclosed version.",
+  "technologies": {
+    "Apache HTTP Server": [
+      {
+        "cve": "CVE-2021-41773",
+        "since": "2.4.49",
+        "fixed": "2.4.51",
+        "severity": "high",
+        "summary": "Path traversal and remote file disclosure via map_encoded traversal (2.4.49/2.4.50)"
+      },
+      {
+        "cve": "CVE-2021-42013",
+        "since": "2.4.49",
+        "fixed": "2.4.51",
+        "severity": "critical",
+        "summary": "Path traversal leading to RCE via double URL-encoding (2.4.49/2.4.50)"
+      }
+    ],
+    "Nginx": [
+      {
+        "cve": "CVE-2021-23017",
+        "since": "1.9.10",
+        "fixed": "1.21.0",
+        "severity": "high",
+        "summary": "DNS resolver off-by-one heap write enabling spoofed responses and RCE"
+      }
+    ],
+    "Apache Struts": [
+      {
+        "cve": "CVE-2017-5638",
+        "since": "2.3.0",
+        "fixed": "2.3.32",
+        "severity": "critical",
+        "summary": "Jakarta Multipart parser RCE via crafted Content-Type (Equifax breach vector)"
+      },
+      {
+        "cve": "CVE-2017-5638",
+        "since": "2.5.0",
+        "fixed": "2.5.10.1",
+        "severity": "critical",
+        "summary": "Jakarta Multipart parser RCE via crafted Content-Type (2.5 branch)"
+      }
+    ],
+    "WordPress": [
+      {
+        "cve": "CVE-2022-21661",
+        "since": "3.7.0",
+        "fixed": "5.8.3",
+        "severity": "high",
+        "summary": "WP_Query SQL injection via plugin-supplied taxonomy/meta queries"
+      }
+    ],
+    "Drupal": [
+      {
+        "cve": "CVE-2018-7600",
+        "since": "7.0",
+        "fixed": "7.58",
+        "severity": "critical",
+        "summary": "Drupalgeddon2: pre-auth remote code execution via Form API (7.x)"
+      },
+      {
+        "cve": "CVE-2018-7600",
+        "since": "8.0",
+        "fixed": "8.5.1",
+        "severity": "critical",
+        "summary": "Drupalgeddon2: pre-auth remote code execution via Form API (8.x)"
+      }
+    ],
+    "PHP": [
+      {
+        "cve": "CVE-2024-4577",
+        "since": "8.1.0",
+        "fixed": "8.1.29",
+        "severity": "critical",
+        "summary": "CGI argument injection on Windows via soft-type string conversion (best-fit mapping)"
+      },
+      {
+        "cve": "CVE-2024-4577",
+        "since": "8.2.0",
+        "fixed": "8.2.20",
+        "severity": "critical",
+        "summary": "CGI argument injection on Windows (8.2 branch)"
+      },
+      {
+        "cve": "CVE-2024-4577",
+        "since": "8.3.0",
+        "fixed": "8.3.8",
+        "severity": "critical",
+        "summary": "CGI argument injection on Windows (8.3 branch)"
+      }
+    ],
+    "Django": [
+      {
+        "cve": "CVE-2021-35042",
+        "since": "3.1.0",
+        "fixed": "3.1.12",
+        "severity": "high",
+        "summary": "QuerySet.order_by() SQL injection when column names are client-controlled (3.1 branch)"
+      },
+      {
+        "cve": "CVE-2021-35042",
+        "since": "3.2.0",
+        "fixed": "3.2.5",
+        "severity": "high",
+        "summary": "QuerySet.order_by() SQL injection (3.2 branch)"
+      }
+    ],
+    "Spring Framework": [
+      {
+        "cve": "CVE-2022-22965",
+        "since": "5.3.0",
+        "fixed": "5.3.18",
+        "severity": "critical",
+        "summary": "Spring4Shell: remote code execution via data binding on JDK 9+ with Tomcat WAR deployments (5.3.x)"
+      },
+      {
+        "cve": "CVE-2022-22965",
+        "since": "5.2.0",
+        "fixed": "5.2.20",
+        "severity": "critical",
+        "summary": "Spring4Shell RCE (5.2 branch)"
+      }
+    ],
+    "Apache Tomcat": [
+      {
+        "cve": "CVE-2025-24813",
+        "since": "9.0.0",
+        "fixed": "9.0.99",
+        "severity": "critical",
+        "summary": "Partial PUT deserialization RCE with read-only-enabled default servlet (9.x)"
+      },
+      {
+        "cve": "CVE-2025-24813",
+        "since": "10.1.0",
+        "fixed": "10.1.35",
+        "severity": "critical",
+        "summary": "Partial PUT deserialization RCE (10.1 branch)"
+      },
+      {
+        "cve": "CVE-2025-24813",
+        "since": "11.0.0",
+        "fixed": "11.0.3",
+        "severity": "critical",
+        "summary": "Partial PUT deserialization RCE (11.0 branch)"
+      }
+    ],
+    "Next.js": [
+      {
+        "cve": "CVE-2025-29927",
+        "since": "13.0.0",
+        "fixed": "13.5.9",
+        "severity": "critical",
+        "summary": "Middleware authorization bypass via x-middleware-subrequest header (13.x)"
+      },
+      {
+        "cve": "CVE-2025-29927",
+        "since": "14.0.0",
+        "fixed": "14.2.25",
+        "severity": "critical",
+        "summary": "Middleware authorization bypass via x-middleware-subrequest header (14.x)"
+      },
+      {
+        "cve": "CVE-2025-29927",
+        "since": "15.0.0",
+        "fixed": "15.2.3",
+        "severity": "critical",
+        "summary": "Middleware authorization bypass via x-middleware-subrequest header (15.x)"
+      }
+    ],
+    "Laravel": [
+      {
+        "cve": "CVE-2021-3129",
+        "since": "8.0.0",
+        "fixed": "8.4.2",
+        "severity": "critical",
+        "summary": "Ignition debug-mode file write leading to remote code execution"
+      }
+    ]
+  }
+}

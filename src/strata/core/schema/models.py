@@ -26,6 +26,7 @@ class FindingClass(enum.StrEnum):
     ENDPOINT = "endpoint"
     SECRET = "secret"
     PARAM = "param"
+    VULN = "vuln"
 
 
 class FindingStatus(enum.StrEnum):
