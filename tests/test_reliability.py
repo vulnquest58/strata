@@ -69,3 +69,14 @@ def test_reliability_weights_are_laplace_smoothed() -> None:
     assert "weak" not in weights
     assert "unknown" not in weights
     assert weights["strong"] == (9 + 1) / (18 + 2)
+
+
+def test_mean_predicted_is_not_double_scaled() -> None:
+    # Ledger stores predicted confidence on the 0-100 scale; the aggregator
+    # must report it on the same scale, not multiply by 100 a second time.
+    rows = [
+        {"sources": ["src"], "predicted": 35.0, "observed": 1},
+        {"sources": ["src"], "predicted": 45.0, "observed": 0},
+    ]
+    reliability = assess_source_reliability(rows)
+    assert reliability["src"]["mean_predicted"] == 40.0

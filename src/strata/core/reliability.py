@@ -148,7 +148,7 @@ def assess_source_reliability(
             "dead": entry["dead"],
             "observed_rate": round(rate * 100, 1),
             "mean_predicted": round(
-                entry["predicted_sum"] / outcomes * 100, 1
+                entry["predicted_sum"] / outcomes, 1
             ) if outcomes else 0.0,
             "flagged": flagged,
             "flag_reason": reason,
