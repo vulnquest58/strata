@@ -255,7 +255,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
         info("nothing rankable yet; run `strata run` first")
         return 0
     print()
-    for item in ranked[: args.top]:
+    for _finding, item in ranked[: args.top]:
         color = (
             C.RED if item.value >= 70
             else C.YELLOW if item.value >= 40
@@ -264,7 +264,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
         reasons = "; ".join(item.reasons[:2])
         print(
             f"  {color}{item.value:5.1f}{C.RST}  "
-            f"{C.BOLD}{item.asset_value[:60]:<60}{C.RST}  "
+            f"{C.BOLD}{redact_url(item.asset_value)[:60]:<60}{C.RST}  "
             f"{C.GRAY}{reasons}{C.RST}"
         )
     if len(ranked) > args.top:
@@ -275,12 +275,12 @@ def cmd_targets(args: argparse.Namespace) -> int:
             "",
             f"- target: {target or 'all'}",
             "",
-            "| Value | Asset | Reasons |",
-            "|---:|---|---|",
+            "| Value | Asset | Status | Reasons |",
+            "|---:|---|---|---|",
         ]
-        for item in ranked:
+        for finding, item in ranked:
             lines.append(
-                f"| {item.value:.1f} | {item.asset_value} | "
+                f"| {item.value:.1f} | {item.asset_value} | {finding.status.value} | "
                 f"{'; '.join(item.reasons)} |"
             )
         Path(args.out).write_text(
@@ -305,7 +305,7 @@ def cmd_portfolio(args: argparse.Namespace) -> int:
             f for f in findings
             if f.kind == FindingClass.VULN and f.status != FindingStatus.DEAD
         ]
-        hot = ranked[0] if ranked else None
+        hot = ranked[0][1] if ranked else None
         sections.append((target_name, count, verified, len(vulns), hot))
     db.close()
 
