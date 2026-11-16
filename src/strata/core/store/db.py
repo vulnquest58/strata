@@ -561,6 +561,31 @@ class StrataDB:
         outcomes = self.iter_outcomes(target=target)
         return assess_source_reliability(outcomes)
 
+    def calibration_model(self, *, target: str | None = None):
+        """Fitted isotonic recalibration model for a target (global fallback).
+
+        Per-target outcomes are preferred. When the target has too few
+        outcomes to fit, a global model is used *if* one is active; an
+        already-calibrated target (enough samples, no CV improvement) is
+        never overridden by global data.
+        """
+        from strata.core.calibration import CalibrationModel
+
+        target = _normalise_target(target)
+        outcomes = self.iter_outcomes(target=target)
+        model = CalibrationModel.from_outcomes(
+            outcomes, scope="target" if target else "global"
+        )
+        if target and not model.applied and model.reason.startswith("insufficient"):
+            global_outcomes = self.iter_outcomes(target=None)
+            if len(global_outcomes) > len(outcomes):
+                global_model = CalibrationModel.from_outcomes(
+                    global_outcomes, scope="global"
+                )
+                if global_model.applied:
+                    return global_model
+        return model
+
     def record_technique_stats(
         self, scope: str, entries: dict[str, tuple[int, int]]
     ) -> int:

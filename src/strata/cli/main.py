@@ -343,6 +343,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     db = StrataDB(args.db)
     target = _scoped_target(db, args.target)
     findings = list(db.iter_findings(target=target))
+    model = db.calibration_model(target=target)
     db.close()
 
     if args.min_confidence is not None:
@@ -357,13 +358,24 @@ def cmd_report(args: argparse.Namespace) -> int:
     report_path = Path(args.out) if args.out else timestamped_report_path(
         prefix=prefix, extension=fmt.value
     )
-    write_report(findings, report_path, fmt, title=args.title)
+    write_report(
+        findings, report_path, fmt, title=args.title, calibration=model
+    )
 
     section("Report", Icon.OK)
     print_kv_table([
         KV("target",   target or "all",         C.WHITE),
         KV("format",   fmt.value,              C.CYAN),
         KV("findings", str(len(findings)),      C.BGREEN),
+        KV(
+            "calibrated",
+            (
+                f"yes ({model.scope}, n={model.samples})"
+                if model.applied
+                else f"no ({model.reason})"
+            ),
+            C.CYAN if model.applied else C.GRAY,
+        ),
         KV("output",   str(report_path),        C.WHITE),
     ])
     print()
@@ -433,6 +445,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     target = _scoped_target(db, args.target)
     data = db.calibration(target=target)
     reliability = db.source_reliability(target=target)
+    model = db.calibration_model(target=target)
     db.close()
 
     prefix = f"strata-calibration-{target.replace('.', '-')}" if target else "strata-calibration"
@@ -475,6 +488,31 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
                 f"{entry['dead']} | {entry['observed_rate']}% | "
                 f"{'yes' if entry['flagged'] else 'no'} |"
             )
+    lines.extend(
+        [
+            "",
+            "## Recalibration model",
+            "",
+            f"- scope: {model.scope}",
+            f"- samples: {model.samples}",
+            f"- applied: {'yes' if model.applied else 'no'}",
+            f"- reason: {model.reason}",
+            f"- blend weight: {model.weight}",
+            f"- cv brier raw: {model.brier_raw if model.brier_raw is not None else 'n/a'}",
+            "- cv brier calibrated: "
+            f"{model.brier_calibrated if model.brier_calibrated is not None else 'n/a'}",
+        ]
+    )
+    if model.applied:
+        lines.extend(
+            [
+                "",
+                "| Raw confidence | Calibrated |",
+                "|---:|---:|",
+            ]
+        )
+        for point in range(10, 100, 10):
+            lines.append(f"| {point} | {model.transform(point)} |")
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
     section("Confidence Calibration", Icon.INFO)
@@ -518,6 +556,33 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         for source, entry in flagged:
             warn(f"{source}: {entry['flag_reason']}")
         print()
+    section("Recalibration model", Icon.BULLET)
+    print_kv_table([
+        KV("scope",    model.scope,             C.WHITE),
+        KV("samples",  str(model.samples),      C.WHITE),
+        KV(
+            "applied",
+            "yes" if model.applied else "no",
+            C.GREEN if model.applied else C.GRAY,
+        ),
+        KV("reason",   model.reason,            C.GRAY),
+        KV(
+            "brier",
+            (
+                f"{model.brier_raw} -> {model.brier_calibrated}"
+                if model.brier_raw is not None
+                else "-"
+            ),
+            C.CYAN,
+        ),
+    ])
+    if model.applied:
+        print()
+        for point in range(10, 100, 10):
+            print(
+                f"  {C.BOLD}{point:>3}{C.RST} -> {C.GREEN}{model.transform(point):5.1f}{C.RST}"
+            )
+    print()
     ok(f"Calibration report -> {C.CYAN}{report_path}{C.RST}")
     return 0
 

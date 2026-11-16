@@ -155,6 +155,7 @@ class RunResult:
     db_stats: dict[str, int] = field(default_factory=dict)
     manifest: dict[str, Any] | None = None
     manifest_path: Path | None = None
+    calibration: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -356,6 +357,7 @@ class Orchestrator:
         self._stages_this_run: list[StageResult] = []
         self._version = _package_version()
         self._report_path: Path | None = None
+        self._calibration_model = None
         self._manifest = RunManifest(
             target=self._target,
             scope=self._scope,
@@ -466,6 +468,8 @@ class Orchestrator:
         result.db_stats = final_stats
         result.report_path = self._report_path
         result.memory = memory
+        if self._calibration_model is not None:
+            result.calibration = self._calibration_model.to_dict()
         memory.runs += 1
         self._log.footer(final_stats)
         if not self._options.dry_run:
@@ -493,6 +497,11 @@ class Orchestrator:
                 ],
                 report=str(self._report_path) if self._report_path else None,
                 budget=self._budget.snapshot() if self._budget else None,
+                calibration=(
+                    self._calibration_model.to_dict()
+                    if self._calibration_model is not None
+                    else None
+                ),
             )
             self._manifest.write(manifest_path)
             result.manifest_path = manifest_path
@@ -595,6 +604,7 @@ class Orchestrator:
             )
         if not self._options.no_fuse:
             plan.append(("fuse", "reconcile duplicate entities across engines"))
+        plan.append(("calibrate", "fit confidence recalibration from the truth ledger"))
         plan.append(("tension", "score evidence tension for prioritization"))
         plan.append(("report", "summarize and persist the current picture"))
         return plan
@@ -619,6 +629,8 @@ class Orchestrator:
             return await self._stage_probe(db, before)
         if stage == "fuse":
             return self._stage_fuse(db, before)
+        if stage == "calibrate":
+            return self._stage_calibrate(db, before)
         if stage == "tension":
             return self._stage_tension(db, before)
         if stage == "report":
@@ -1109,6 +1121,38 @@ class Orchestrator:
             notes=notes,
         )
 
+    def _stage_calibrate(self, db: StrataDB, before: dict[str, int]) -> StageResult:
+        self._log.stage(
+            "calibrate", "fit confidence recalibration from the truth ledger"
+        )
+        model = db.calibration_model(target=self._target)
+        self._calibration_model = model
+        stats = {
+            "outcomes": model.samples,
+            "applied": model.applied,
+            "weight": model.weight,
+            "brier_before": model.brier_raw,
+            "brier_after": model.brier_calibrated,
+        }
+        self._log.stat(_db_stats_line(stats))
+        notes: list[str] = []
+        if model.applied:
+            notes.append(
+                f"recalibration active ({model.scope}, n={model.samples}, "
+                f"brier {model.brier_raw} -> {model.brier_calibrated})"
+            )
+        else:
+            notes.append(f"raw confidence kept: {model.reason}")
+        for note in notes:
+            self._log.note(note)
+        return StageResult(
+            stage="calibrate",
+            new_findings=0,
+            total_findings=before.get("findings", 0),
+            stats=stats,
+            notes=notes,
+        )
+
     def _stage_tension(self, db: StrataDB, before: dict[str, int]) -> StageResult:
         self._log.stage("tension", "score evidence tension for prioritization")
         findings = list(db.iter_findings(target=self._target))
@@ -1189,6 +1233,7 @@ class Orchestrator:
             fmt,
             title=self._options.title,
             manifest=self._manifest.to_dict(),
+            calibration=self._calibration_model,
         )
         self._report_path = report_path
         self._log.stat(f"report={report_path} format={fmt.value}")

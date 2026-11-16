@@ -251,6 +251,42 @@ source's observed verify rate. A source that keeps dying on claims the rest of
 the pool verifies is flagged as possibly poisoned or low quality, and fusion
 can down-weight it on the next run.
 
+### Isotonic recalibration
+
+Band tables show a drift; recalibration corrects it. From the same ledger,
+Strata fits a monotone map from predicted confidence to observed verify rate
+(pool-adjacent-violators isotonic regression) and applies it at report time:
+
+- **Per-target model** — the target's own outcomes are used when they are
+  sufficient; otherwise the model falls back to the global ledger. A
+  calibrated target is never overridden by the global model.
+- **Cross-validated gate** — the map only activates when it beats the
+  identity map on held-out folds by at least 1% relative Brier improvement.
+  Otherwise confidence stays raw and the run records why.
+- **Smoothing and blending** — Laplace smoothing keeps small blocks away from
+  0/1, a weighted re-pooling pass keeps the map monotone, and the calibrated
+  value is blended with the raw value by `n / (n + 40)` so a thin ledger
+  cannot swing claims.
+
+The model never rewrites stored findings, so the learning loop cannot feed its
+own output back into the ledger. The pipeline runs a `calibrate` stage between
+`fuse` and `tension`; reports show calibrated values (a `Calibrated` column in
+Markdown, an inline arrow in HTML) and a provenance line only when the gate
+accepted a model, and manifests record the applied model (scope, samples,
+weight, cross-validated Brier before/after).
+
+```bash
+strata calibrate --db target.db --target target.com   # fit and inspect the map
+strata report --db target.db --target target.com      # calibrated column
+```
+
+Live validation on the v0.5.0 kali.org experiment: 153 ledger outcomes,
+reliability bands showed the engine was under-confident (predicted 35.2 vs
+observed 100% in the 20-39 band), and the cross-validated recalibration cut
+Brier score from 0.384 to 0.046. Calibrated confidence is best read as the
+verify rate among *attempted* claims; verification is scheduled by expected
+information gain, so high-EIG candidates are over-represented in the ledger.
+
 ---
 
 ## Self-Calibrating Beliefs
@@ -466,7 +502,7 @@ strata verify          Re-resolve stored candidates to verified/dead
 strata content         JS/robots/sitemap content discovery
 strata fuse            Fuse duplicate entities across runs
 strata tension         Evidence tension analysis
-strata calibrate       Confidence calibration from outcomes
+strata calibrate       Fit/inspect confidence recalibration from outcomes
 strata coverage        Surface coverage estimation (capture-recapture)
 strata arbitrate       List claims where discovery sources conflict
 strata takeover        Verify dangling CNAMEs against service fingerprints

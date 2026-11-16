@@ -4,6 +4,36 @@ All notable changes to Strata are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and releases use
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-11-16
+
+### Added
+
+- Isotonic recalibration (`core/calibration.py`): the truth ledger now
+  closes the loop. A monotone pool-adjacent-violators map from predicted
+  confidence to observed verify rate is fitted per target (global ledger as
+  fallback) with Laplace smoothing, identity blending (`n / (n + 40)`), and a
+  k-fold cross-validated gate that activates the map only when it beats the
+  identity map by at least 1% relative Brier improvement. Stored findings are
+  never rewritten; calibration is applied at read time so the learning loop
+  cannot feed its own output back into the ledger.
+- `calibrate` pipeline stage between `fuse` and `tension`; runs carry the
+  applied model in `RunResult.calibration` and in the manifest (scope,
+  samples, weight, Brier before/after, reason).
+- Reports gain a `Calibrated` column and a recalibration provenance line only
+  when the gate accepted a model; HTML rows show the calibrated arrow.
+  `strata calibrate` prints the mapping grid (10-90) and writes a
+  `## Recalibration model` section; `strata report` shows a `calibrated` row.
+- Live validation on the v0.5.0 kali.org ledger (153 outcomes): reliability
+  bands showed under-confidence (predicted 35.2 vs observed 100% in 20-39);
+  cross-validated recalibration reduced Brier from 0.384 to 0.046.
+
+### Fixed
+
+- Isotonic smoothing could invert block order when block sizes differed
+  widely (Laplace shrinkage penalizes small samples), producing a
+  non-monotone confidence map; blocks are now re-pooled after smoothing by
+  effective sample size, and duplicate-x blocks collapse to one value.
+
 ## [0.5.0] - 2026-11-15
 
 ### Added

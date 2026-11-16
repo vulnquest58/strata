@@ -214,9 +214,11 @@ def markdown_report(
     *,
     title: str = "Strata report",
     manifest: dict[str, Any] | None = None,
+    calibration: Any | None = None,
 ) -> str:
     items = _ordered(findings)
     summary = summarise(items)
+    calibrated = bool(calibration is not None and getattr(calibration, "applied", False))
     lines = [
         f"# {title}",
         "",
@@ -258,6 +260,15 @@ def markdown_report(
     )
     for label, count in _tension_buckets(items):
         lines.append(f"| {label} | {count} |")
+    if calibrated:
+        lines.extend(
+            [
+                "",
+                f"_Confidence recalibrated from {calibration.samples} ledger outcomes "
+                f"(scope: {calibration.scope}; cross-validated Brier "
+                f"{calibration.brier_raw} -> {calibration.brier_calibrated})._",
+            ]
+        )
     if manifest:
         lines.extend(
             [
@@ -276,26 +287,45 @@ def markdown_report(
             "",
             "## Findings",
             "",
-            "| Confidence | Status | Kind | Asset | Evidence | Sources |",
-            "|---:|---|---|---|---:|---:|",
+            (
+                "| Confidence | Calibrated | Status | Kind | Asset | Evidence | Sources |"
+                if calibrated
+                else "| Confidence | Status | Kind | Asset | Evidence | Sources |"
+            ),
+            ("|---:|---:|---|---|---|---:|---:|" if calibrated else "|---:|---|---|---|---:|---:|"),
         ]
     )
     for finding in items:
         asset = _safe_asset(finding).replace("|", "\\|")
-        lines.append(
-            f"| {finding.confidence.value:.1f} | {finding.status.value} | "
-            f"{finding.kind.value} | {asset} | {len(finding.evidence)} | "
-            f"{_source_count(finding)} |"
-        )
+        if calibrated:
+            lines.append(
+                f"| {finding.confidence.value:.1f} | "
+                f"{calibration.transform(finding.confidence.value):.1f} | "
+                f"{finding.status.value} | "
+                f"{finding.kind.value} | {asset} | {len(finding.evidence)} | "
+                f"{_source_count(finding)} |"
+            )
+        else:
+            lines.append(
+                f"| {finding.confidence.value:.1f} | {finding.status.value} | "
+                f"{finding.kind.value} | {asset} | {len(finding.evidence)} | "
+                f"{_source_count(finding)} |"
+            )
     return "\n".join(lines) + "\n"
 
 
-def _html_row(finding: UnifiedFinding) -> str:
+def _html_row(finding: UnifiedFinding, calibration: Any | None = None) -> str:
     confidence = finding.confidence.value
+    calibrated = ""
+    if calibration is not None and getattr(calibration, "applied", False):
+        calibrated = (
+            f"<span class=\"num cal\"> &rarr; "
+            f"{calibration.transform(confidence):.1f}</span>"
+        )
     return (
         "<tr>"
         f"<td class=\"conf\"><span class=\"bar\" style=\"width:{confidence:.0f}%\"></span>"
-        f"<span class=\"num\">{confidence:.1f}</span></td>"
+        f"<span class=\"num\">{confidence:.1f}</span>{calibrated}</td>"
         f"<td><span class=\"badge badge-{html.escape(finding.status.value)}\">"
         f"{html.escape(finding.status.value)}</span></td>"
         f"<td>{html.escape(finding.kind.value)}</td>"
@@ -311,10 +341,11 @@ def html_report(
     *,
     title: str = "Strata report",
     manifest: dict[str, Any] | None = None,
+    calibration: Any | None = None,
 ) -> str:
     items = _ordered(findings)
     summary = summarise(items)
-    rows = "".join(_html_row(f) for f in items)
+    rows = "".join(_html_row(f, calibration) for f in items)
     kind_rows = "".join(
         f"<tr><td>{html.escape(kind)}</td><td class=\"num\">{count}</td></tr>"
         for kind, count in summary.by_kind.items()
@@ -436,6 +467,7 @@ def write_report(
     *,
     title: str = "Strata report",
     manifest: dict[str, Any] | None = None,
+    calibration: Any | None = None,
 ) -> ReportSummary:
     items = _ordered(findings)
     summary = summarise(items)
@@ -445,13 +477,13 @@ def write_report(
     format_value = ReportFormat(fmt)
     if format_value is ReportFormat.HTML:
         output.write_text(
-            html_report(items, title=title, manifest=manifest),
+            html_report(items, title=title, manifest=manifest, calibration=calibration),
             encoding="utf-8",
             newline="\n",
         )
     elif format_value is ReportFormat.MARKDOWN:
         output.write_text(
-            markdown_report(items, title=title, manifest=manifest),
+            markdown_report(items, title=title, manifest=manifest, calibration=calibration),
             encoding="utf-8",
             newline="\n",
         )

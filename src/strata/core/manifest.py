@@ -35,6 +35,7 @@ class RunManifest:
     stages: list[dict[str, Any]] = field(default_factory=list)
     report: str | None = None
     budget: dict[str, Any] | None = None
+    calibration: dict[str, Any] | None = None
     strata_version: str = __version__
     schema_version: str = MANIFEST_SCHEMA_VERSION
     python: str = field(default_factory=platform.python_version)
@@ -67,12 +68,14 @@ class RunManifest:
         stages: list[dict[str, Any]],
         report: str | None,
         budget: dict[str, Any] | None = None,
+        calibration: dict[str, Any] | None = None,
     ) -> None:
         self.finished_at = _now()
         self.stats = dict(stats)
         self.stages = list(stages)
         self.report = report
         self.budget = budget
+        self.calibration = calibration
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -87,6 +90,7 @@ class RunManifest:
             "stages": self.stages,
             "report": self.report,
             "budget": self.budget,
+            "calibration": self.calibration,
             "python": self.python,
             "platform": self.platform,
             "fingerprint": self.fingerprint(),
